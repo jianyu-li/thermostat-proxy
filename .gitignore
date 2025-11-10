@@ -1,4 +1,4 @@
-tmp_better_thermostat
+tmp_better_thermostat/
 .DS_Store
 __pycache__/
 *.pyc
