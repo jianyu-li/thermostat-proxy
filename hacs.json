@@ -1,5 +1,7 @@
 {
   "name": "Thermostat Proxy",
-  "domain": "thermostat_proxy",
+  "content_in_root": false,
+  "zip_release": false,
+  "filename": "custom_components/thermostat_proxy/manifest.json",
   "render_readme": true
 }
