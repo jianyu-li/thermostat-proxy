@@ -6,6 +6,8 @@ A Home Assistant custom integration that lets you expose a virtual `climate` ent
 
 > ⚠️ **Caution — Active Development:** This integration is moving quickly. Expect frequent updates and occasional breaking changes while configuration options and defaults are still being refined.
 
+![Thermostat Proxy screenshot](images/main.png)
+
 ## Features
 
 - Wraps an existing `climate` entity; copies all of its attributes for dashboards/automations.
@@ -63,6 +65,54 @@ data:
 ```
 
 The integration will take the currently selected sensor’s temperature, compare it to the requested value, and offset the real thermostat accordingly.
+
+Automatically move the proxy to the kitchen sensor whenever the fireplace is running so the extra heat doesn’t throw off the default thermostat:
+
+```yaml
+alias: Thermostat Mode Adjust
+description: Automatically adjust thermostat proxy preset mode.
+triggers:
+  - trigger: state
+    entity_id:
+      - switch.fireplace
+    to:
+      - "on"
+    id: Fireplace On
+    from:
+      - "off"
+  - trigger: state
+    entity_id:
+      - switch.fireplace
+    to:
+      - "off"
+    id: Fireplace Off
+    from:
+      - "on"
+conditions: []
+actions:
+  - choose:
+      - conditions:
+          - condition: trigger
+            id:
+              - Fireplace On
+        sequence:
+          - action: climate.set_preset_mode
+            data:
+              preset_mode: Kitchen
+            target:
+              entity_id: climate.custom_thermostat
+      - conditions:
+          - condition: trigger
+            id:
+              - Fireplace Off
+        sequence:
+          - action: climate.set_preset_mode
+            data:
+              preset_mode: Physical Entity
+            target:
+              entity_id: climate.custom_thermostat
+mode: single
+```
 
 ## Limitations / Notes
 
