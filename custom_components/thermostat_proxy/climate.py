@@ -24,6 +24,12 @@ from homeassistant.components.climate.const import (
     SERVICE_SET_TEMPERATURE,
     ClimateEntityFeature,
 )
+from homeassistant.components.logbook import DOMAIN as LOGBOOK_DOMAIN
+
+try:
+    from homeassistant.components.logbook import SERVICE_LOG as LOGBOOK_SERVICE_LOG
+except ImportError:  # Older HA versions don't expose SERVICE_LOG
+    LOGBOOK_SERVICE_LOG = "log"
 from homeassistant.const import (
     ATTR_ENTITY_ID,
     ATTR_TEMPERATURE,
@@ -577,6 +583,17 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 self._sync_virtual_target_from_real(real_target)
         await self._async_realign_real_target_from_sensor()
         self.async_write_ha_state()
+
+        await self.hass.services.async_call(
+            LOGBOOK_DOMAIN,
+            LOGBOOK_SERVICE_LOG,
+            {
+                "name": self.name,
+                "entity_id": self.entity_id,
+                "message": f"Preset changed to '{preset_mode}'",
+            },
+            blocking=False,
+        )
 
     async def _async_realign_real_target_from_sensor(self) -> None:
         """Push a new target temperature to the real thermostat based on the active sensor."""
