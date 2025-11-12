@@ -70,3 +70,7 @@ The integration will take the currently selected sensor’s temperature, compare
 - Because Home Assistant does not expose the real thermostat’s precision/step directly, changes to `current_temperature` or the linked thermostat may momentarily desync the displayed target temperature if another integration changes the physical thermostat. The entity exposes the real target temperature as an attribute so you can reconcile differences.
 - **Whole-degree sensors will appear “off by one” whenever the wrapped thermostat supports finer precision (0.5°, 0.1°, etc.).** The custom entity only knows the rounded value from that whole-degree sensor, so it must treat every change as a full degree while the physical thermostat can still react in smaller steps. In practice this means the virtual thermometer may say “1° below target” while the real thermostat has already closed the gap. 
 - **Virtual target may “self-adjust” after the physical thermostat reports an update.** When the integration notices the real thermostat’s target or current temp changed outside of Home Assistant, you may see a slight change in the virtual setpoint as `sensor + (real_target - real_current)` so the two stay in sync. 
+
+## Contributing
+
+Contributions are welcome! Feel free to create a new branch and submit pull a request!
