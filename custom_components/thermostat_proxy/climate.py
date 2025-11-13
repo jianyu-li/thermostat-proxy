@@ -310,8 +310,12 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self._temperature_unit = self._discover_temperature_unit()
         real_target = self._get_real_target_temperature()
         if real_target is not None:
-            self._sync_virtual_target_from_real(real_target)
+            synced_target = self._sync_virtual_target_from_real(real_target)
             self._last_real_target_temp = real_target
+            if synced_target is not None:
+                self.hass.async_create_task(
+                    self._async_log_virtual_target_sync(synced_target, real_target)
+                )
         self.async_write_ha_state()
 
     @callback
@@ -393,13 +397,13 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self._mark_entity_health(sensor.entity_id, True)
         return value
 
-    def _sync_virtual_target_from_real(self, real_target: float) -> None:
+    def _sync_virtual_target_from_real(self, real_target: float) -> float | None:
         if (
             self._last_requested_real_target is not None
             and math.isclose(real_target, self._last_requested_real_target, abs_tol=0.05)
         ):
             self._last_requested_real_target = None
-            return
+            return None
 
         sensor_temp = self._get_active_sensor_temperature()
         real_current = self._get_real_current_temperature()
@@ -407,12 +411,23 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         if sensor_temp is None:
             sensor_temp = real_current
         if sensor_temp is None or real_current is None:
-            return
+            return None
         derived = sensor_temp + (real_target - real_current)
-        if derived is not None:
-            self._virtual_target_temperature = self._apply_target_constraints(derived)
-        else:
-            self._virtual_target_temperature = fallback
+        new_target = (
+            self._apply_target_constraints(derived) if derived is not None else fallback
+        )
+        if new_target is None:
+            return None
+
+        previous_target = self._virtual_target_temperature
+        tolerance = max(self.precision or DEFAULT_PRECISION, 0.1)
+        if previous_target is not None and math.isclose(
+            previous_target, new_target, abs_tol=tolerance
+        ):
+            return None
+
+        self._virtual_target_temperature = new_target
+        return new_target
 
     @property
     def temperature_unit(self) -> str:
@@ -602,6 +617,26 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 "name": self.name,
                 "entity_id": self.entity_id,
                 "message": f"Preset changed to '{preset_mode}'",
+            },
+            blocking=False,
+        )
+
+    async def _async_log_virtual_target_sync(
+        self, virtual_target: float, real_target: float
+    ) -> None:
+        """Record a logbook entry when we auto-sync to the real thermostat."""
+
+        unit = self.temperature_unit or ""
+        await self.hass.services.async_call(
+            LOGBOOK_DOMAIN,
+            LOGBOOK_SERVICE_LOG,
+            {
+                "name": self.name,
+                "entity_id": self.entity_id,
+                "message": (
+                    "Target auto-synced to %s%s from real thermostat (%s%s)"
+                    % (virtual_target, unit, real_target, unit)
+                ),
             },
             blocking=False,
         )
