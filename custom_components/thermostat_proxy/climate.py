@@ -53,6 +53,7 @@ from .const import (
     ATTR_REAL_TARGET_TEMPERATURE,
     ATTR_SELECTED_SENSOR_OPTIONS,
     ATTR_UNAVAILABLE_ENTITIES,
+    CONF_PHYSICAL_SENSOR_NAME,
     DEFAULT_NAME,
     PHYSICAL_SENSOR_NAME,
     PHYSICAL_SENSOR_SENTINEL,
@@ -100,6 +101,7 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
         vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
         vol.Optional(CONF_UNIQUE_ID): cv.string,
         vol.Optional(CONF_DEFAULT_SENSOR): cv.string,
+        vol.Optional(CONF_PHYSICAL_SENSOR_NAME): cv.string,
     }
 )
 
@@ -121,6 +123,9 @@ async def async_setup_platform(
                 sensors=config[CONF_SENSORS],
                 default_sensor=config.get(CONF_DEFAULT_SENSOR),
                 unique_id=config.get(CONF_UNIQUE_ID),
+                physical_sensor_name=config.get(
+                    CONF_PHYSICAL_SENSOR_NAME, PHYSICAL_SENSOR_NAME
+                ),
             )
         ]
     )
@@ -143,9 +148,10 @@ async def async_setup_entry(
         return
 
     default_sensor = entry.options.get(CONF_DEFAULT_SENSOR) or data.get(CONF_DEFAULT_SENSOR)
+    physical_sensor_name = data.get(CONF_PHYSICAL_SENSOR_NAME, PHYSICAL_SENSOR_NAME)
     valid_sensor_names = [sensor[CONF_SENSOR_NAME] for sensor in sensors]
-    if PHYSICAL_SENSOR_NAME not in valid_sensor_names:
-        valid_sensor_names.append(PHYSICAL_SENSOR_NAME)
+    if physical_sensor_name not in valid_sensor_names:
+        valid_sensor_names.append(physical_sensor_name)
 
     if default_sensor and default_sensor not in valid_sensor_names:
         _LOGGER.warning(
@@ -164,6 +170,7 @@ async def async_setup_entry(
                 sensors=sensors,
                 default_sensor=default_sensor,
                 unique_id=data.get(CONF_UNIQUE_ID) or entry.entry_id,
+                physical_sensor_name=physical_sensor_name,
             )
         ]
     )
@@ -191,11 +198,15 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         sensors: list[dict[str, Any]],
         default_sensor: str | None,
         unique_id: str | None,
+        physical_sensor_name: str | None,
     ) -> None:
         self.hass = hass
         self._attr_name = name
         self._attr_unique_id = unique_id
         self._real_entity_id = real_thermostat
+        self._physical_sensor_name = (
+            physical_sensor_name or PHYSICAL_SENSOR_NAME
+        )
         base_sensors: list[SensorConfig] = [
             SensorConfig(name=item[CONF_SENSOR_NAME], entity_id=item[CONF_SENSOR_ENTITY_ID])
             for item in sensors
@@ -741,17 +752,19 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
     def _add_physical_sensor(self, sensors: list[SensorConfig]) -> list[SensorConfig]:
         sensors_with_physical = list(sensors)
-        if any(sensor.name == PHYSICAL_SENSOR_NAME for sensor in sensors_with_physical):
+        if any(
+            sensor.name == self._physical_sensor_name for sensor in sensors_with_physical
+        ):
             _LOGGER.warning(
                 "Sensor name '%s' is reserved for %s; skipping built-in physical sensor",
-                PHYSICAL_SENSOR_NAME,
+                self._physical_sensor_name,
                 self.entity_id,
             )
             return sensors_with_physical
 
         sensors_with_physical.append(
             SensorConfig(
-                name=PHYSICAL_SENSOR_NAME,
+                name=self._physical_sensor_name,
                 entity_id=PHYSICAL_SENSOR_SENTINEL,
                 is_physical=True,
             )

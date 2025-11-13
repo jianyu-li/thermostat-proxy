@@ -43,8 +43,9 @@
       },
       "finalize": {
         "title": "Defaults",
-        "description": "Optionally select which sensor is active on startup.",
+        "description": "Optionally rename the physical thermostat preset and select which sensor is active on startup.",
         "data": {
+          "physical_sensor_name": "Physical thermostat preset name",
           "default_sensor": "Default sensor"
         }
       }
@@ -55,6 +56,7 @@
       "reserved_sensor_name": "That name is reserved for the physical thermostat sensor.",
       "no_sensors": "Add at least one sensor before finishing.",
       "invalid_default_sensor": "Select a sensor from the list.",
+      "physical_name_conflict": "Choose a different name for the physical thermostat preset.",
       "already_configured": "This unique ID is already in use."
     },
     "abort": {

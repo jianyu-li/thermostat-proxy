@@ -17,13 +17,13 @@ A Home Assistant custom integration that lets you expose a virtual `climate` ent
 - `climate.set_temperature` service adjusts the linked thermostat by the delta between the selected sensor reading and your requested temperature.
 - Exposes helper attributes: active sensor, sensor entity id, real current temperature, and the last real target temperature.
 - Remembers the previously selected sensor/target temperature across restarts and surfaces an `unavailable_entities` attribute so you can monitor unhealthy dependencies.
-- Always adds a built-in `Physical Entity` preset that points back to the wrapped thermostat’s own temperature reading so you can revert or set it as the default sensor.
+- Always adds a built-in preset for the wrapped thermostat’s own temperature reading (named `Physical Entity` by default, but you can rename it during setup) so you can revert or set it as the default sensor.
 
 ## Installation
 
 1. Copy the `custom_components/thermostat_proxy` directory into your Home Assistant `config/custom_components` folder.
 2. Restart Home Assistant.
-3. In Home Assistant, go to **Settings → Devices & Services → Add Integration → Thermostat Proxy** and walk through the wizard: pick the physical thermostat, add and name your temperature sensors (each name becomes a preset), and optionally choose which sensor (including the automatically provided “Physical Entity” option) should be active by default. You can revisit the integration’s **Configure** button later to change the default sensor without re-creating the entry.
+3. In Home Assistant, go to **Settings → Devices & Services → Add Integration → Thermostat Proxy** and walk through the wizard: pick the physical thermostat, add and name your temperature sensors (each name becomes a preset), optionally rename the built-in physical thermostat preset, and choose which sensor should be active by default. You can revisit the integration’s **Configure** button later to change the default sensor without re-creating the entry.
 
 ## Configuration Notes
 
@@ -67,7 +67,7 @@ data:
 
 The integration will take the currently selected sensor’s temperature, compare it to the requested value, and offset the real thermostat accordingly.
 
-Automatically move the proxy to the kitchen sensor whenever the fireplace is running so the extra heat doesn’t throw off the default thermostat:
+Automatically move the proxy to the kitchen sensor whenever the fireplace is running so the extra heat doesn’t throw off the default thermostat, then fall back to the physical preset (renamed if you customized it) once the fire is off:
 
 ```yaml
 alias: Thermostat Mode Adjust

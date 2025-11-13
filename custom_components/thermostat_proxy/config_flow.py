@@ -14,6 +14,7 @@ from homeassistant.util import slugify
 
 from .const import (
     CONF_DEFAULT_SENSOR,
+    CONF_PHYSICAL_SENSOR_NAME,
     CONF_SENSOR_ENTITY_ID,
     CONF_SENSOR_NAME,
     CONF_SENSORS,
@@ -48,6 +49,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._data: dict[str, Any] = {}
         self._sensors: list[dict[str, str]] = []
         self._default_sensor: str | None = None
+        self._physical_sensor_name: str = PHYSICAL_SENSOR_NAME
         self._reconfigure_entry: config_entries.ConfigEntry | None = None
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None):
@@ -68,6 +70,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
             self._sensors = []
             self._default_sensor = None
+            self._physical_sensor_name = PHYSICAL_SENSOR_NAME
             return await self.async_step_manage_sensors()
 
         data_schema = vol.Schema(
@@ -104,6 +107,9 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             for sensor in entry.data.get(CONF_SENSORS, [])
         ]
         self._default_sensor = entry.data.get(CONF_DEFAULT_SENSOR)
+        self._physical_sensor_name = entry.data.get(
+            CONF_PHYSICAL_SENSOR_NAME, PHYSICAL_SENSOR_NAME
+        )
 
         errors: dict[str, str] = {}
         if user_input is not None:
@@ -179,7 +185,11 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             sensor_name = user_input[CONF_SENSOR_NAME].strip()
             entity_id = user_input[CONF_SENSOR_ENTITY_ID]
 
-            if sensor_name.lower() == PHYSICAL_SENSOR_NAME.lower():
+            reserved_names = {
+                PHYSICAL_SENSOR_NAME.lower(),
+                self._physical_sensor_name.lower(),
+            }
+            if sensor_name.lower() in reserved_names:
                 errors["base"] = "reserved_sensor_name"
             elif any(sensor_name == sensor[CONF_SENSOR_NAME] for sensor in self._sensors):
                 errors["base"] = "duplicate_sensor_name"
@@ -257,18 +267,47 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors["base"] = "no_sensors"
 
         sensor_names = [sensor[CONF_SENSOR_NAME] for sensor in self._sensors]
-        if PHYSICAL_SENSOR_NAME not in sensor_names:
-            sensor_names.append(PHYSICAL_SENSOR_NAME)
+        current_physical_name = self._physical_sensor_name
+        available_default_options = list(sensor_names)
+        if current_physical_name not in available_default_options:
+            available_default_options.append(current_physical_name)
 
         default_sensor = self._default_sensor
         if user_input is not None:
             default_sensor = user_input.get(CONF_DEFAULT_SENSOR)
-            if default_sensor and default_sensor not in sensor_names:
+            submitted_physical_name = user_input.get(
+                CONF_PHYSICAL_SENSOR_NAME, current_physical_name
+            )
+            physical_sensor_name = (
+                submitted_physical_name.strip() if submitted_physical_name else ""
+            ) or PHYSICAL_SENSOR_NAME
+
+            if any(
+                physical_sensor_name.lower() == sensor_name.lower()
+                for sensor_name in sensor_names
+            ):
+                errors["base"] = "physical_name_conflict"
+            elif default_sensor and default_sensor not in available_default_options:
                 errors["base"] = "invalid_default_sensor"
             else:
+                if (
+                    default_sensor
+                    and default_sensor == current_physical_name
+                    and physical_sensor_name != current_physical_name
+                ):
+                    default_sensor = physical_sensor_name
+
+                self._default_sensor = default_sensor
+                self._physical_sensor_name = physical_sensor_name
+
+                sensor_names_with_physical = list(sensor_names)
+                if physical_sensor_name not in sensor_names_with_physical:
+                    sensor_names_with_physical.append(physical_sensor_name)
+
                 data = {
                     **self._data,
                     CONF_SENSORS: self._sensors,
+                    CONF_PHYSICAL_SENSOR_NAME: self._physical_sensor_name,
                 }
                 if default_sensor:
                     data[CONF_DEFAULT_SENSOR] = default_sensor
@@ -277,7 +316,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     current_option_default = options.get(CONF_DEFAULT_SENSOR)
                     if (
                         current_option_default
-                        and current_option_default not in sensor_names
+                        and current_option_default not in sensor_names_with_physical
                     ):
                         options.pop(CONF_DEFAULT_SENSOR)
                     self.hass.config_entries.async_update_entry(
@@ -291,26 +330,29 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     return self.async_abort(reason="reconfigure_successful")
                 return self.async_create_entry(title=self._data[CONF_NAME], data=data)
 
+        schema_fields: dict[Any, Any] = {
+            vol.Optional(
+                CONF_PHYSICAL_SENSOR_NAME, default=self._physical_sensor_name
+            ): selector.TextSelector(
+                selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
+            )
+        }
+
         if sensor_names:
-            selector_config = selector.SelectSelectorConfig(options=sensor_names)
-            if default_sensor and default_sensor in sensor_names:
-                data_schema = vol.Schema(
-                    {
-                        vol.Optional(
-                            CONF_DEFAULT_SENSOR, default=default_sensor
-                        ): selector.SelectSelector(selector_config)
-                    }
-                )
+            selector_config = selector.SelectSelectorConfig(options=available_default_options)
+            if (
+                default_sensor
+                and default_sensor in available_default_options
+            ):
+                schema_fields[
+                    vol.Optional(CONF_DEFAULT_SENSOR, default=default_sensor)
+                ] = selector.SelectSelector(selector_config)
             else:
-                data_schema = vol.Schema(
-                    {
-                        vol.Optional(CONF_DEFAULT_SENSOR): selector.SelectSelector(
-                            selector_config
-                        )
-                    }
-                )
-        else:
-            data_schema = vol.Schema({})
+                schema_fields[
+                    vol.Optional(CONF_DEFAULT_SENSOR)
+                ] = selector.SelectSelector(selector_config)
+
+        data_schema = vol.Schema(schema_fields)
 
         return self.async_show_form(
             step_id=FINALIZE_STEP,
@@ -348,8 +390,11 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
     async def async_step_init(self, user_input: dict[str, Any] | None = None):
         sensors = self.config_entry.data.get(CONF_SENSORS, [])
         sensor_names = [sensor[CONF_SENSOR_NAME] for sensor in sensors]
-        if PHYSICAL_SENSOR_NAME not in sensor_names:
-            sensor_names.append(PHYSICAL_SENSOR_NAME)
+        physical_sensor_name = self.config_entry.data.get(
+            CONF_PHYSICAL_SENSOR_NAME, PHYSICAL_SENSOR_NAME
+        )
+        if physical_sensor_name not in sensor_names:
+            sensor_names.append(physical_sensor_name)
         if not sensor_names:
             sensor_names = [None]
 
