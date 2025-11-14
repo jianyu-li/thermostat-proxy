@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
@@ -238,6 +239,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self._entity_health: dict[str, bool] = {}
         self._command_lock = asyncio.Lock()
         self._sensor_realign_task: asyncio.Task | None = None
+        self._suppress_sync_logs_until: float | None = None
 
     async def async_added_to_hass(self) -> None:
         """Finish setup when entity is added."""
@@ -312,7 +314,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         if real_target is not None:
             synced_target = self._sync_virtual_target_from_real(real_target)
             self._last_real_target_temp = real_target
-            if synced_target is not None:
+            if synced_target is not None and self._should_log_auto_sync():
                 self.hass.async_create_task(
                     self._async_log_virtual_target_sync(synced_target, real_target)
                 )
@@ -584,6 +586,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
             self._virtual_target_temperature = constrained_target
             self._last_requested_real_target = real_target
+            self._start_auto_sync_log_suppression()
             self.async_write_ha_state()
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
@@ -641,6 +644,21 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             blocking=False,
         )
 
+    def _start_auto_sync_log_suppression(self) -> None:
+        """Temporarily silence auto-sync logs after commands we initiate."""
+
+        self._suppress_sync_logs_until = time.monotonic() + 5
+
+    def _should_log_auto_sync(self) -> bool:
+        """Return True if we're outside the suppression window."""
+
+        if self._suppress_sync_logs_until is None:
+            return True
+        if time.monotonic() >= self._suppress_sync_logs_until:
+            self._suppress_sync_logs_until = None
+            return True
+        return False
+
     async def _async_realign_real_target_from_sensor(self) -> None:
         """Push a new target temperature to the real thermostat based on the active sensor."""
 
@@ -680,6 +698,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             )
             self._last_requested_real_target = desired_real_target
             self._last_real_target_temp = desired_real_target
+            self._start_auto_sync_log_suppression()
 
 
     async def _async_restore_state(self) -> None:
