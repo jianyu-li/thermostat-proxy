@@ -64,6 +64,7 @@ from .const import (
     CONF_SENSORS,
     CONF_THERMOSTAT,
     CONF_UNIQUE_ID,
+    CONF_SYNC_PHYSICAL_CHANGES,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -103,6 +104,7 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
         vol.Optional(CONF_UNIQUE_ID): cv.string,
         vol.Optional(CONF_DEFAULT_SENSOR): cv.string,
         vol.Optional(CONF_PHYSICAL_SENSOR_NAME): cv.string,
+        vol.Optional(CONF_SYNC_PHYSICAL_CHANGES, default=False): cv.boolean,
     }
 )
 
@@ -127,6 +129,7 @@ async def async_setup_platform(
                 physical_sensor_name=config.get(
                     CONF_PHYSICAL_SENSOR_NAME, PHYSICAL_SENSOR_NAME
                 ),
+                sync_physical_changes=config.get(CONF_SYNC_PHYSICAL_CHANGES, False),
             )
         ]
     )
@@ -172,6 +175,7 @@ async def async_setup_entry(
                 default_sensor=default_sensor,
                 unique_id=data.get(CONF_UNIQUE_ID) or entry.entry_id,
                 physical_sensor_name=physical_sensor_name,
+                sync_physical_changes=data.get(CONF_SYNC_PHYSICAL_CHANGES, False),
             )
         ]
     )
@@ -200,6 +204,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         default_sensor: str | None,
         unique_id: str | None,
         physical_sensor_name: str | None,
+        sync_physical_changes: bool,
     ) -> None:
         self.hass = hass
         self._attr_name = name
@@ -216,6 +221,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self._sensor_lookup: dict[str, SensorConfig] = {
             sensor.name: sensor for sensor in self._sensors
         }
+        self._sync_physical_changes = sync_physical_changes
         self._configured_default_sensor = (
             default_sensor if default_sensor in self._sensor_lookup else None
         )
@@ -312,12 +318,24 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self._temperature_unit = self._discover_temperature_unit()
         real_target = self._get_real_target_temperature()
         if real_target is not None:
-            synced_target = self._sync_virtual_target_from_real(real_target)
             self._last_real_target_temp = real_target
-            if synced_target is not None and self._should_log_auto_sync():
-                self.hass.async_create_task(
-                    self._async_log_virtual_target_sync(synced_target, real_target)
+            tolerance = max(self.precision or DEFAULT_PRECISION, 0.1)
+            if (
+                self._last_requested_real_target is not None
+                and math.isclose(
+                    real_target,
+                    self._last_requested_real_target,
+                    abs_tol=tolerance,
                 )
+            ):
+                self._last_requested_real_target = None
+            elif self._sync_physical_changes:
+                synced_target = self._sync_virtual_target_from_real(real_target)
+                if synced_target is not None and self._should_log_auto_sync():
+                    self.hass.async_create_task(
+                        self._async_log_virtual_target_sync(synced_target, real_target)
+                    )
+        self._schedule_target_realign()
         self.async_write_ha_state()
 
     @callback
@@ -330,7 +348,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             self._sensor_states[entity_id] = new_state
         self._update_sensor_health_from_state(entity_id, new_state)
         if self._is_active_sensor_entity(entity_id):
-            self._schedule_sensor_realignment()
+            self._schedule_target_realign()
         self.async_write_ha_state()
 
     def _is_active_sensor_entity(self, entity_id: str | None) -> bool:
@@ -341,7 +359,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             return False
         return sensor.entity_id == entity_id
 
-    def _schedule_sensor_realignment(self) -> None:
+    def _schedule_target_realign(self) -> None:
         if self._sensor_realign_task and not self._sensor_realign_task.done():
             return
 
@@ -400,13 +418,6 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         return value
 
     def _sync_virtual_target_from_real(self, real_target: float) -> float | None:
-        if (
-            self._last_requested_real_target is not None
-            and math.isclose(real_target, self._last_requested_real_target, abs_tol=0.05)
-        ):
-            self._last_requested_real_target = None
-            return None
-
         sensor_temp = self._get_active_sensor_temperature()
         real_current = self._get_real_current_temperature()
         fallback = self._virtual_target_temperature
@@ -577,6 +588,13 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             if ATTR_HVAC_MODE in kwargs and kwargs[ATTR_HVAC_MODE] is not None:
                 payload[ATTR_HVAC_MODE] = kwargs[ATTR_HVAC_MODE]
 
+            await self._async_log_real_adjustment(
+                desired_target=real_target,
+                reason="proxy target set",
+                virtual_target=constrained_target,
+                sensor_temp=display_current,
+                real_current=real_current,
+            )
             await self.hass.services.async_call(
                 CLIMATE_DOMAIN,
                 SERVICE_SET_TEMPERATURE,
@@ -687,6 +705,13 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             ):
                 return
 
+            await self._async_log_real_adjustment(
+                desired_target=desired_real_target,
+                reason="sensor realignment",
+                virtual_target=self._virtual_target_temperature,
+                sensor_temp=sensor_temp,
+                real_current=real_current,
+            )
             await self.hass.services.async_call(
                 CLIMATE_DOMAIN,
                 SERVICE_SET_TEMPERATURE,
@@ -824,6 +849,42 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             )
         )
         return sensors_with_physical
+
+    async def _async_log_real_adjustment(
+        self,
+        *,
+        desired_target: float | None,
+        reason: str,
+        virtual_target: float | None,
+        sensor_temp: float | None,
+        real_current: float | None,
+    ) -> None:
+        if desired_target is None:
+            return
+        unit = self.temperature_unit or ""
+        context_parts = []
+        if virtual_target is not None:
+            context_parts.append(f"virtual={virtual_target}{unit}")
+        if sensor_temp is not None:
+            context_parts.append(f"sensor={sensor_temp}{unit}")
+        if real_current is not None:
+            context_parts.append(f"real_current={real_current}{unit}")
+        context = ", ".join(context_parts) if context_parts else "no context"
+        message = (
+            "Adjusted %s to %s%s because %s (%s)"
+            % (self._real_entity_id, desired_target, unit, reason, context)
+        )
+        _LOGGER.info("%s %s", self.entity_id, message)
+        await self.hass.services.async_call(
+            LOGBOOK_DOMAIN,
+            LOGBOOK_SERVICE_LOG,
+            {
+                "name": self.name,
+                "entity_id": self.entity_id,
+                "message": message,
+            },
+            blocking=False,
+        )
 
 
 def _coerce_temperature(value: Any) -> float | None:

@@ -15,6 +15,7 @@ CONF_SENSOR_ENTITY_ID = "entity_id"
 CONF_DEFAULT_SENSOR = "default_sensor"
 CONF_UNIQUE_ID = "unique_id"
 CONF_PHYSICAL_SENSOR_NAME = "physical_sensor_name"
+CONF_SYNC_PHYSICAL_CHANGES = "sync_physical_changes"
 
 ATTR_ACTIVE_SENSOR = "active_sensor"
 ATTR_ACTIVE_SENSOR_ENTITY_ID = "active_sensor_entity_id"
