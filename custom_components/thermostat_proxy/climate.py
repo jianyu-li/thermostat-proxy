@@ -631,13 +631,28 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         await self._async_realign_real_target_from_sensor()
         self.async_write_ha_state()
 
+        sensor = self._sensor_lookup.get(preset_mode)
+        sensor_entity = None
+        if sensor:
+            sensor_entity = (
+                self._real_entity_id if sensor.is_physical else sensor.entity_id
+            )
+        unit = self.temperature_unit or ""
+        sensor_temp = self._get_active_sensor_temperature()
+        sensor_display = self._format_log_temperature(sensor_temp)
+        segments = [f"sensor_name={preset_mode}"]
+        segments.append(f"sensor_entity={sensor_entity or 'unknown'}")
+        if sensor_display is not None:
+            segments.append(f"sensor_temperature={sensor_display}{unit}")
+
         await self.hass.services.async_call(
             LOGBOOK_DOMAIN,
             LOGBOOK_SERVICE_LOG,
             {
                 "name": self.name,
                 "entity_id": self.entity_id,
-                "message": f"Preset changed to '{preset_mode}'",
+                "message": "Preset changed to '%s': %s"
+                % (preset_mode, " | ".join(segments)),
             },
             blocking=False,
         )
@@ -648,6 +663,47 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         """Record a logbook entry when we auto-sync to the real thermostat."""
 
         unit = self.temperature_unit or ""
+        sensor_temp = self._get_active_sensor_temperature()
+        real_current = self._get_real_current_temperature()
+
+        sensor_display = self._format_log_temperature(sensor_temp)
+        virtual_display = self._format_log_temperature(virtual_target)
+        real_target_display = self._format_log_temperature(real_target)
+        real_current_display = self._format_log_temperature(real_current)
+
+        sensor_val = self._round_log_temperature_value(sensor_temp)
+        real_target_val = self._round_log_temperature_value(real_target)
+        real_current_val = self._round_log_temperature_value(real_current)
+        virtual_val = self._round_log_temperature_value(virtual_target)
+
+        segments: list[str] = []
+        if real_target_display is not None:
+            segments.append(f"real_target={real_target_display}{unit}")
+        if real_current_display is not None:
+            segments.append(f"real_current_temperature={real_current_display}{unit}")
+            real_math = self._format_math_real_to_virtual(
+                real_target_val,
+                real_current_val,
+                unit,
+            )
+            if real_math:
+                segments.append(real_math)
+        if sensor_display is not None:
+            segments.append(f"sensor_temperature={sensor_display}{unit}")
+        if virtual_display is not None:
+            virtual_math = self._format_math_sensor_plus_delta(
+                sensor_val,
+                real_target_val,
+                real_current_val,
+                virtual_val,
+                unit,
+            )
+            if virtual_math:
+                segments.append(virtual_math)
+            segments.append(f"virtual_target={virtual_display}{unit}")
+        if not segments:
+            segments.append("no context available")
+
         await self.hass.services.async_call(
             LOGBOOK_DOMAIN,
             LOGBOOK_SERVICE_LOG,
@@ -655,8 +711,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 "name": self.name,
                 "entity_id": self.entity_id,
                 "message": (
-                    "Target auto-synced to %s%s from real thermostat (%s%s)"
-                    % (virtual_target, unit, real_target, unit)
+                    "Virtual target auto-synced after %s reported a new target: %s"
+                    % (self._real_entity_id, " | ".join(segments))
                 ),
             },
             blocking=False,
@@ -862,17 +918,40 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         if desired_target is None:
             return
         unit = self.temperature_unit or ""
-        context_parts = []
-        if virtual_target is not None:
-            context_parts.append(f"virtual={virtual_target}{unit}")
-        if sensor_temp is not None:
-            context_parts.append(f"sensor={sensor_temp}{unit}")
-        if real_current is not None:
-            context_parts.append(f"real_current={real_current}{unit}")
-        context = ", ".join(context_parts) if context_parts else "no context"
+        sensor_display = self._format_log_temperature(sensor_temp)
+        virtual_display = self._format_log_temperature(virtual_target)
+        real_display = self._format_log_temperature(real_current)
+        sensor_val = self._round_log_temperature_value(sensor_temp)
+        virtual_val = self._round_log_temperature_value(virtual_target)
+        real_val = self._round_log_temperature_value(real_current)
+        desired_val = self._round_log_temperature_value(desired_target)
+
+        segments: list[str] = []
+        if sensor_display is not None:
+            segments.append(f"sensor_temperature={sensor_display}{unit}")
+        if virtual_display is not None:
+            segments.append(f"virtual_target={virtual_display}{unit}")
+            sensor_math = self._format_math_sensor_virtual(sensor_val, virtual_val, unit)
+            if sensor_math:
+                segments.append(sensor_math)
+        if real_display is not None:
+            segments.append(f"real_current_temperature={real_display}{unit}")
+            real_math = self._format_math_real_adjustment(
+                real_val,
+                sensor_val,
+                virtual_val,
+                desired_val,
+                unit,
+            )
+            if real_math:
+                segments.append(real_math)
+        if not segments:
+            segments.append("no context available")
+
+        context_text = " | ".join(segments)
         message = (
-            "Adjusted %s to %s%s because %s (%s)"
-            % (self._real_entity_id, desired_target, unit, reason, context)
+            "Adjusted target on %s to %s%s (%s): %s"
+            % (self._real_entity_id, desired_target, unit, reason, context_text)
         )
         _LOGGER.info("%s %s", self.entity_id, message)
         await self.hass.services.async_call(
@@ -885,6 +964,87 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             },
             blocking=False,
         )
+
+    def _format_log_temperature(self, value: float | None) -> str | None:
+        rounded = self._round_log_temperature_value(value)
+        if rounded is None:
+            return None
+        return str(rounded)
+
+    def _round_log_temperature_value(self, value: float | None) -> int | None:
+        if value is None:
+            return None
+        return int(round(value))
+
+    def _format_math_sensor_virtual(
+        self,
+        sensor_val: int | None,
+        virtual_val: int | None,
+        unit: str,
+    ) -> str | None:
+        if sensor_val is None or virtual_val is None:
+            return None
+        diff = sensor_val - virtual_val
+        return f"{sensor_val}{unit} - {virtual_val}{unit} = {diff}{unit}"
+
+    def _format_math_real_adjustment(
+        self,
+        real_val: int | None,
+        sensor_val: int | None,
+        virtual_val: int | None,
+        desired_val: int | None,
+        unit: str,
+    ) -> str | None:
+        if (
+            real_val is None
+            or sensor_val is None
+            or virtual_val is None
+        ):
+            return None
+        diff = sensor_val - virtual_val
+        if diff >= 0:
+            op = "-"
+            delta = diff
+        else:
+            op = "+"
+            delta = abs(diff)
+        result = desired_val if desired_val is not None else real_val - diff
+        return f"{real_val}{unit} {op} {delta}{unit} = {result}{unit}"
+
+    def _format_math_real_to_virtual(
+        self,
+        real_target_val: int | None,
+        real_current_val: int | None,
+        unit: str,
+    ) -> str | None:
+        if real_target_val is None or real_current_val is None:
+            return None
+        diff = real_target_val - real_current_val
+        return f"{real_target_val}{unit} - {real_current_val}{unit} = {diff}{unit}"
+
+    def _format_math_sensor_plus_delta(
+        self,
+        sensor_val: int | None,
+        real_target_val: int | None,
+        real_current_val: int | None,
+        virtual_val: int | None,
+        unit: str,
+    ) -> str | None:
+        if (
+            sensor_val is None
+            or real_target_val is None
+            or real_current_val is None
+        ):
+            return None
+        diff = real_target_val - real_current_val
+        if diff >= 0:
+            op = "+"
+            delta = diff
+        else:
+            op = "-"
+            delta = abs(diff)
+        result = virtual_val if virtual_val is not None else sensor_val + diff
+        return f"{sensor_val}{unit} {op} {delta}{unit} = {result}{unit}"
 
 
 def _coerce_temperature(value: Any) -> float | None:
