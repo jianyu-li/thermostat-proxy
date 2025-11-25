@@ -25,6 +25,7 @@ A Home Assistant custom integration that lets you expose a virtual `climate` ent
 - Remembers the previously selected sensor/target temperature across restarts and surfaces an `unavailable_entities` attribute so you can monitor unhealthy dependencies.
 - Always adds a built-in preset for the wrapped thermostat’s own temperature reading (named `Physical Entity` by default, but you can rename it during setup) so you can revert or set it as the default sensor.
 - Optional "Sync manual physical changes" mode captures target changes made on the real thermostat and treats them as manual overrides for the proxy.
+- Default sensor selector includes a "Last active sensor" option (during setup or in options) so the proxy resumes with the most recently selected sensor instead of the configured default.
 
 ## How It Works
 
@@ -119,6 +120,7 @@ mode: single
 - Because Home Assistant does not expose the real thermostat’s precision/step directly, changes to `current_temperature` or the linked thermostat may momentarily desync the displayed target temperature if another integration changes the physical thermostat. The entity exposes the real target temperature as an attribute so you can reconcile differences.
 - **Whole-degree sensors will appear “off by one” whenever the wrapped thermostat supports finer precision (0.5°, 0.1°, etc.).** The custom entity only knows the rounded value from that whole-degree sensor, so it must treat every change as a full degree while the physical thermostat can still react in smaller steps. In practice this means the virtual thermometer may say “1° below target” while the real thermostat has already closed the gap. 
 - Manual changes made directly on the physical thermostat do not affect the proxy unless you enable "Sync manual physical changes" (available in the finalize step while configuring or reconfiguring). When enabled, the proxy derives a new virtual target via `selected_sensor + (real_target - real_current)` so the two stay aligned.
+- If you pick a specific default sensor instead of "Last active sensor", the proxy will fall back to that default after a restart even if you had switched to a different preset earlier.
 
 ## Contributing
 
