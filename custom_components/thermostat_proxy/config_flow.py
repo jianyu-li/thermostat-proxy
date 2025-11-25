@@ -18,7 +18,6 @@ from .const import (
     CONF_SENSOR_ENTITY_ID,
     CONF_SENSOR_NAME,
     CONF_SENSORS,
-    CONF_SYNC_PHYSICAL_CHANGES,
     DEFAULT_SENSOR_LAST_ACTIVE,
     CONF_THERMOSTAT,
     CONF_UNIQUE_ID,
@@ -54,7 +53,6 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._default_sensor: str | None = None
         self._physical_sensor_name: str = PHYSICAL_SENSOR_NAME
         self._use_last_active_sensor: bool = False
-        self._sync_physical_changes: bool = False
         self._reconfigure_entry: config_entries.ConfigEntry | None = None
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None):
@@ -76,7 +74,6 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._sensors = []
             self._default_sensor = None
             self._physical_sensor_name = PHYSICAL_SENSOR_NAME
-            self._sync_physical_changes = False
             return await self.async_step_manage_sensors()
 
         data_schema = vol.Schema(
@@ -122,7 +119,6 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if self._default_sensor == DEFAULT_SENSOR_LAST_ACTIVE:
             self._use_last_active_sensor = True
             self._default_sensor = None
-        self._sync_physical_changes = entry.data.get(CONF_SYNC_PHYSICAL_CHANGES, False)
 
         errors: dict[str, str] = {}
         if user_input is not None:
@@ -295,9 +291,6 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             submitted_physical_name = user_input.get(
                 CONF_PHYSICAL_SENSOR_NAME, current_physical_name
             )
-            sync_physical_changes = user_input.get(
-                CONF_SYNC_PHYSICAL_CHANGES, self._sync_physical_changes
-            )
             physical_sensor_name = (
                 submitted_physical_name.strip() if submitted_physical_name else ""
             ) or PHYSICAL_SENSOR_NAME
@@ -323,7 +316,6 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 )
                 self._physical_sensor_name = physical_sensor_name
                 self._use_last_active_sensor = use_last_active_sensor
-                self._sync_physical_changes = sync_physical_changes
 
                 sensor_names_with_physical = list(sensor_names)
                 if physical_sensor_name not in sensor_names_with_physical:
@@ -334,7 +326,6 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_SENSORS: self._sensors,
                     CONF_PHYSICAL_SENSOR_NAME: self._physical_sensor_name,
                     CONF_USE_LAST_ACTIVE_SENSOR: self._use_last_active_sensor,
-                    CONF_SYNC_PHYSICAL_CHANGES: self._sync_physical_changes,
                 }
                 if self._use_last_active_sensor:
                     data[CONF_DEFAULT_SENSOR] = DEFAULT_SENSOR_LAST_ACTIVE
@@ -367,12 +358,6 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
             )
         }
-
-        schema_fields[
-            vol.Optional(
-                CONF_SYNC_PHYSICAL_CHANGES, default=self._sync_physical_changes
-            )
-        ] = selector.BooleanSelector(selector.BooleanSelectorConfig())
 
         if sensor_names:
             default_options = [

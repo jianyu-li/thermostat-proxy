@@ -66,7 +66,6 @@ from .const import (
     CONF_UNIQUE_ID,
     DEFAULT_SENSOR_LAST_ACTIVE,
     CONF_USE_LAST_ACTIVE_SENSOR,
-    CONF_SYNC_PHYSICAL_CHANGES,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -107,7 +106,6 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
         vol.Optional(CONF_DEFAULT_SENSOR): cv.string,
         vol.Optional(CONF_PHYSICAL_SENSOR_NAME): cv.string,
         vol.Optional(CONF_USE_LAST_ACTIVE_SENSOR, default=False): cv.boolean,
-        vol.Optional(CONF_SYNC_PHYSICAL_CHANGES, default=False): cv.boolean,
     }
 )
 
@@ -139,7 +137,6 @@ async def async_setup_platform(
                     CONF_PHYSICAL_SENSOR_NAME, PHYSICAL_SENSOR_NAME
                 ),
                 use_last_active_sensor=use_last_active_sensor,
-                sync_physical_changes=config.get(CONF_SYNC_PHYSICAL_CHANGES, False),
             )
         ]
     )
@@ -196,7 +193,6 @@ async def async_setup_entry(
                 unique_id=data.get(CONF_UNIQUE_ID) or entry.entry_id,
                 physical_sensor_name=physical_sensor_name,
                 use_last_active_sensor=use_last_active_sensor,
-                sync_physical_changes=data.get(CONF_SYNC_PHYSICAL_CHANGES, False),
             )
         ]
     )
@@ -226,7 +222,6 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         unique_id: str | None,
         physical_sensor_name: str | None,
         use_last_active_sensor: bool,
-        sync_physical_changes: bool,
     ) -> None:
         self.hass = hass
         self._attr_name = name
@@ -243,7 +238,6 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self._sensor_lookup: dict[str, SensorConfig] = {
             sensor.name: sensor for sensor in self._sensors
         }
-        self._sync_physical_changes = sync_physical_changes
         self._configured_default_sensor = (
             default_sensor if default_sensor in self._sensor_lookup else None
         )
@@ -341,6 +335,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self._temperature_unit = self._discover_temperature_unit()
         real_target = self._get_real_target_temperature()
         if real_target is not None:
+            previous_real_target = self._last_real_target_temp
             self._last_real_target_temp = real_target
             tolerance = max(self.precision or DEFAULT_PRECISION, 0.1)
             if (
@@ -352,12 +347,10 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 )
             ):
                 self._last_requested_real_target = None
-            elif self._sync_physical_changes:
-                synced_target = self._sync_virtual_target_from_real(real_target)
-                if synced_target is not None and self._should_log_auto_sync():
-                    self.hass.async_create_task(
-                        self._async_log_virtual_target_sync(synced_target, real_target)
-                    )
+            elif previous_real_target is not None and not math.isclose(
+                real_target, previous_real_target, abs_tol=tolerance
+            ):
+                self._handle_external_real_target_change(real_target)
         self._schedule_target_realign()
         self.async_write_ha_state()
 
@@ -393,6 +386,19 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 self._sensor_realign_task = None
 
         self._sensor_realign_task = self.hass.async_create_task(_run())
+
+    def _handle_external_real_target_change(self, real_target: float) -> None:
+        """React to target changes made outside the proxy."""
+
+        self._virtual_target_temperature = self._apply_target_constraints(real_target)
+
+        switched = self._selected_sensor_name != self._physical_sensor_name
+        self._selected_sensor_name = self._physical_sensor_name
+        self.async_write_ha_state()
+
+        self.hass.async_create_task(
+            self._async_log_physical_override(real_target, switched)
+        )
 
     def _discover_temperature_unit(self) -> str:
         if self._real_state and (unit := self._real_state.attributes.get("unit_of_measurement")):
@@ -736,6 +742,40 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 "message": (
                     "Virtual target auto-synced after %s reported a new target: %s"
                     % (self._real_entity_id, " | ".join(segments))
+                ),
+            },
+            blocking=False,
+        )
+
+    async def _async_log_physical_override(
+        self, real_target: float | None, switched: bool
+    ) -> None:
+        """Record when an external change forces us to the physical preset."""
+
+        unit = self.temperature_unit or ""
+        real_target_display = self._format_log_temperature(real_target)
+        target_segment = None
+        if real_target_display is not None:
+            target_segment = f"real_target={real_target_display}{unit}"
+
+        segments = [
+            f"source_entity={self._real_entity_id}",
+            f"preset={self._physical_sensor_name}",
+        ]
+        if target_segment:
+            segments.append(target_segment)
+
+        action = "switched" if switched else "kept"
+
+        await self.hass.services.async_call(
+            LOGBOOK_DOMAIN,
+            LOGBOOK_SERVICE_LOG,
+            {
+                "name": self.name,
+                "entity_id": self.entity_id,
+                "message": (
+                    "Detected external target change; %s preset to '%s': %s"
+                    % (action, self._physical_sensor_name, " | ".join(segments))
                 ),
             },
             blocking=False,

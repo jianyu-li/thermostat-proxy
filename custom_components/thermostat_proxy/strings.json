@@ -43,11 +43,10 @@
       },
       "finalize": {
         "title": "Defaults",
-        "description": "Optionally rename the physical thermostat preset, choose whether manual changes on the real thermostat sync back, and decide which sensor (including the last active one) should be active on startup.",
+        "description": "Optionally rename the physical thermostat preset and decide which sensor (including the last active one) should be active on startup.",
         "data": {
           "physical_sensor_name": "Physical thermostat preset name",
-          "default_sensor": "Default sensor",
-          "sync_physical_changes": "Sync manual changes from the physical thermostat"
+          "default_sensor": "Default sensor"
         }
       }
     },
