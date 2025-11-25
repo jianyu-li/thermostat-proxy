@@ -71,6 +71,8 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_PRECISION = 0.1
+PENDING_REQUEST_TOLERANCE_MIN = 0.05
+PENDING_REQUEST_TOLERANCE_MAX = 0.5
 MAX_TRACKED_REAL_TARGET_REQUESTS = 5
 
 # Attributes supplied by ClimateEntity itself that must NOT be overridden by
@@ -339,7 +341,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         if real_target is not None:
             previous_real_target = self._last_real_target_temp
             self._last_real_target_temp = real_target
-            pending_tolerance = max(self.precision or DEFAULT_PRECISION, 0.1)
+            pending_tolerance = self._pending_request_tolerance()
             if self._consume_real_target_request(real_target, pending_tolerance):
                 pass
             elif previous_real_target is not None and not math.isclose(
@@ -403,10 +405,19 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         if len(self._recent_real_target_requests) > MAX_TRACKED_REAL_TARGET_REQUESTS:
             self._recent_real_target_requests.pop(0)
 
+    def _pending_request_tolerance(self) -> float:
+        """Return the tolerance used when matching pending requests."""
+
+        precision = self.precision or DEFAULT_PRECISION
+        return max(
+            PENDING_REQUEST_TOLERANCE_MIN,
+            min(PENDING_REQUEST_TOLERANCE_MAX, precision / 2),
+        )
+
     def _remove_real_target_request(self, real_target: float) -> None:
         """Remove a pending request after failures so we don't ignore real updates."""
 
-        tolerance = max(self.precision or DEFAULT_PRECISION, 0.1)
+        tolerance = self._pending_request_tolerance()
         for index, pending in enumerate(self._recent_real_target_requests):
             if math.isclose(real_target, pending, abs_tol=tolerance):
                 del self._recent_real_target_requests[index]
@@ -859,12 +870,13 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 return
 
             current_real_target = self._get_real_target_temperature()
-            tolerance = max(self.precision or DEFAULT_PRECISION, 0.1)
+            target_tolerance = max(self.precision or DEFAULT_PRECISION, 0.1)
             if current_real_target is not None and math.isclose(
-                current_real_target, desired_real_target, abs_tol=tolerance
+                current_real_target, desired_real_target, abs_tol=target_tolerance
             ):
                 return
-            if self._has_pending_real_target_request(desired_real_target, tolerance):
+            pending_tolerance = self._pending_request_tolerance()
+            if self._has_pending_real_target_request(desired_real_target, pending_tolerance):
                 return
 
             await self._async_log_real_adjustment(
