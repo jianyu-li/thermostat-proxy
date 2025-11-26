@@ -1,6 +1,3 @@
-# ⚠️ Caution
-
-This integration is still in the early days of development, so it is not yet recommended to create automations around it.
 
 # Thermostat Proxy (Home Assistant)
 
