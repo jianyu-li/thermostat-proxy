@@ -19,13 +19,13 @@ jobs:
       - name: Prepare release folder
         run: |
           rm -rf release_pkg
-          mkdir -p release_pkg/custom_components/thermostat_proxy
-          rsync -a --exclude '__pycache__/' --exclude '*.pyc' custom_components/thermostat_proxy/ release_pkg/custom_components/thermostat_proxy/
+          mkdir -p release_pkg/thermostat_proxy/custom_components/thermostat_proxy
+          rsync -a --exclude '__pycache__/' --exclude '*.pyc' custom_components/thermostat_proxy/ release_pkg/thermostat_proxy/custom_components/thermostat_proxy/
 
       - name: Create integration archive
         working-directory: release_pkg
         run: |
-          zip -r ../thermostat_proxy.zip custom_components/thermostat_proxy
+          zip -r ../thermostat_proxy.zip thermostat_proxy
 
       - name: Upload artifact to release
         uses: softprops/action-gh-release@v2
