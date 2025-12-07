@@ -1165,7 +1165,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 segments.append(real_math)
         if not segments:
             segments.append("no context available")
-        
+
         suffix = f" (by {actor_name})" if actor_name else ""
 
         context_text = " | ".join(segments)

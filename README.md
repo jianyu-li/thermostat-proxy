@@ -24,7 +24,7 @@ A Home Assistant custom integration that lets you expose a virtual `climate` ent
 - If someone changes the physical thermostat directly, the proxy automatically switches to the physical preset and logs the change in Home Assistant's logbook.
 - "Overdrive" logic: If the remote sensor hasn't reached the target but the physical thermostat thinks it's done (e.g. goes "Idle"), the proxy will temporarily offset the real target by an additional degree to force the HVAC to keep running until the remote sensor is satisfied.
 - **Fan Mode Support**: Fully proxies the real thermostat's fan modes. You can control the fan (Auto/On/Low/etc.) seamlessly through the proxy entity.
-- **User Log Attribution**: Logbook entries for target temperature or preset changes will show which user performed the action (e.g., "(by Jason)").
+- **User Log Attribution**: Logbook entries for target temperature or preset changes will show which user performed the action.
 - Default sensor selector includes a "Last active sensor" option (during setup or in options) so the proxy resumes with the most recently selected sensor instead of the configured default.
 
 ## How It Works
