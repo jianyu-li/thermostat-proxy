@@ -676,12 +676,14 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             if ATTR_HVAC_MODE in kwargs and kwargs[ATTR_HVAC_MODE] is not None:
                 payload[ATTR_HVAC_MODE] = kwargs[ATTR_HVAC_MODE]
 
+            actor_name = await self._get_actor_name()
             await self._async_log_real_adjustment(
                 desired_target=real_target,
                 reason="proxy target set",
                 virtual_target=constrained_target,
                 sensor_temp=display_current,
                 real_current=real_current,
+                actor_name=actor_name,
             )
             self._record_real_target_request(real_target)
             try:
@@ -706,6 +708,23 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             {
                 ATTR_ENTITY_ID: self._real_entity_id,
                 ATTR_HVAC_MODE: hvac_mode,
+            },
+            blocking=True,
+        )
+
+    async def async_set_fan_mode(self, fan_mode: str) -> None:
+        """Set new target fan mode."""
+        from homeassistant.components.climate.const import (
+            ATTR_FAN_MODE,
+            SERVICE_SET_FAN_MODE,
+        )
+
+        await self.hass.services.async_call(
+            CLIMATE_DOMAIN,
+            SERVICE_SET_FAN_MODE,
+            {
+                ATTR_ENTITY_ID: self._real_entity_id,
+                ATTR_FAN_MODE: fan_mode,
             },
             blocking=True,
         )
@@ -737,14 +756,17 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         if sensor_display is not None:
             segments.append(f"sensor_temperature={sensor_display}{unit}")
 
+        actor_name = await self._get_actor_name()
+        suffix = f" (by {actor_name})" if actor_name else ""
+
         await self.hass.services.async_call(
             LOGBOOK_DOMAIN,
             LOGBOOK_SERVICE_LOG,
             {
                 "name": self.name,
                 "entity_id": self.entity_id,
-                "message": "Preset changed to '%s': %s"
-                % (preset_mode, " | ".join(segments)),
+                "message": "Preset changed to '%s': %s%s"
+                % (preset_mode, " | ".join(segments), suffix),
             },
             blocking=False,
         )
@@ -892,6 +914,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 virtual_target=self._virtual_target_temperature,
                 sensor_temp=sensor_temp,
                 real_current=real_current,
+                actor_name=None,
             )
             self._record_real_target_request(desired_real_target)
             try:
@@ -962,6 +985,21 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             self._precision_override = self._target_temp_step
         else:
             self._precision_override = None
+
+        # Check for fan mode support
+        supported = self._real_state.attributes.get("supported_features", 0)
+        # We need to manually combine flags because ClimateEntityFeature is a flag enum in modern HA
+        # But we inherit everything we don't block.
+        # Wait, we define _attr_supported_features in __init__. We need to merge it.
+        # Let's update _attr_supported_features dynamically.
+        
+        base_features = (
+            ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.PRESET_MODE
+        )
+        if supported & ClimateEntityFeature.FAN_MODE:
+            base_features |= ClimateEntityFeature.FAN_MODE
+            
+        self._attr_supported_features = base_features
 
     def _update_sensor_health_from_state(self, entity_id: str | None, state: State | None) -> None:
         if not entity_id:
@@ -1053,6 +1091,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         virtual_target: float | None,
         sensor_temp: float | None,
         real_current: float | None,
+        actor_name: str | None = None,
     ) -> None:
         if desired_target is None:
             return
@@ -1086,11 +1125,13 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 segments.append(real_math)
         if not segments:
             segments.append("no context available")
+        
+        suffix = f" (by {actor_name})" if actor_name else ""
 
         context_text = " | ".join(segments)
         message = (
-            "Adjusted target on %s to %s%s (%s): %s"
-            % (self._real_entity_id, desired_target, unit, reason, context_text)
+            "Adjusted target on %s to %s%s%s (%s): %s"
+            % (self._real_entity_id, desired_target, unit, suffix, reason, context_text)
         )
         _LOGGER.info("%s %s", self.entity_id, message)
         await self.hass.services.async_call(
@@ -1185,6 +1226,34 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         result = virtual_val if virtual_val is not None else sensor_val + diff
         return f"{sensor_val}{unit} {op} {delta}{unit} = {result}{unit}"
 
+    async def _get_actor_name(self) -> str | None:
+        """Attempt to identify the user who triggered the current action."""
+        if not self._context or not self._context.user_id:
+            return None
+        
+        user = await self.hass.auth.async_get_user(self._context.user_id)
+        return user.name if user else None
+
+    @property
+    def fan_mode(self) -> str | None:
+        """Return the fan setting."""
+        if self._real_state:
+            return self._real_state.attributes.get("fan_mode")
+        return None
+
+    @property
+    def fan_modes(self) -> list[str] | None:
+        """Return the list of available fan modes."""
+        if self._real_state:
+            return self._real_state.attributes.get("fan_modes")
+        return None
+
+    @property
+    def supported_features(self) -> ClimateEntityFeature:
+        """Return the list of supported features."""
+        # Mix in base features with dynamically detected fan support
+        features = self._attr_supported_features
+        return features
 
 def _coerce_temperature(value: Any) -> float | None:
     if value is None:
