@@ -62,6 +62,8 @@ from .const import (
     ATTR_UNAVAILABLE_ENTITIES,
     CONF_PHYSICAL_SENSOR_NAME,
     DEFAULT_NAME,
+    OVERDRIVE_ADJUSTMENT_COOL,
+    OVERDRIVE_ADJUSTMENT_HEAT,
     PHYSICAL_SENSOR_NAME,
     PHYSICAL_SENSOR_SENTINEL,
     CONF_DEFAULT_SENSOR,
@@ -928,7 +930,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                      if want_heat and not_heating:
                          overdrive_active = True
                          # Push target up to force start
-                         overdrive_adjust = 1.0 # Degree matching unit
+                         overdrive_adjust = OVERDRIVE_ADJUSTMENT_HEAT # Degree matching unit
                          _LOGGER.info("Overdrive active: Heating required but thermostat idle. Applying +%s offset.", overdrive_adjust)
 
                  # Cool Mode Stall
@@ -939,7 +941,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                      if want_cool and not_cooling:
                          overdrive_active = True
                          # Push target down to force start
-                         overdrive_adjust = -1.0
+                         overdrive_adjust = OVERDRIVE_ADJUSTMENT_COOL
                          _LOGGER.info("Overdrive active: Cooling required but thermostat idle. Applying %s offset.", overdrive_adjust)
             
             if overdrive_active:
