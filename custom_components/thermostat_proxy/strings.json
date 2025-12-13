@@ -47,7 +47,7 @@
         "data": {
           "physical_sensor_name": "Physical thermostat preset name",
           "default_sensor": "Default sensor",
-          "cooldown_period": "Cooldown period (seconds)"
+          "cooldown_period": "Minimum adjustment interval (seconds)"
         }
       }
     },
@@ -71,7 +71,7 @@
         "title": "Thermostat Proxy options",
         "data": {
           "default_sensor": "Default sensor",
-          "cooldown_period": "Cooldown period (seconds)"
+          "cooldown_period": "Minimum adjustment interval (seconds)"
         }
       }
     },

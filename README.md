@@ -35,7 +35,7 @@ A Home Assistant custom integration that lets you expose a virtual `climate` ent
 | `thermostat` | Yes | | The entity ID of the physical thermostat to wrap. |
 | `target_sensor` | No | | The entity ID of the default temperature sensor to use. If not specified, the proxy will default to the `Physical Entity` preset. |
 | `physical_sensor_name` | No | `Physical Entity` | The name of the preset representing the physical thermostat itself. |
-| `cooldown_period` | No | `0` (Disabled) | Minimum time (in seconds) between automatic updates to the physical thermostat. Useful for preventing rapid cycling with noisy sensors. Retries automatically when cooldown expires. |
+| `cooldown_period` | No | `0` (Disabled) | **Minimum Adjustment Interval**: Minimum time (in seconds) between automatic updates to the physical thermostat. Useful for preventing rapid cycling with noisy sensors. Retries automatically when cooldown expires. |
 
 ## How It Works
 
