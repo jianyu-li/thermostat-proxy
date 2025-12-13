@@ -1014,7 +1014,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
             reason = "sensor realignment" + (" (overdrive)" if overdrive_active else "")
             if retry:
-                reason += " (retry)"
+                reason += " (cooldown expired)"
 
             await self._async_log_real_adjustment(
                 desired_target=desired_real_target,
