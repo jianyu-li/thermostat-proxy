@@ -216,7 +216,6 @@ async def async_setup_entry(
                 sensors=sensors,
                 default_sensor=default_sensor,
                 unique_id=data.get(CONF_UNIQUE_ID) or entry.entry_id,
-                unique_id=data.get(CONF_UNIQUE_ID) or entry.entry_id,
                 physical_sensor_name=physical_sensor_name,
                 use_last_active_sensor=use_last_active_sensor,
                 cooldown_period=cooldown_period,
