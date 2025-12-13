@@ -408,13 +408,13 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             return False
         return sensor.entity_id == entity_id
 
-    def _schedule_target_realign(self) -> None:
+    def _schedule_target_realign(self, retry: bool = False) -> None:
         if self._sensor_realign_task and not self._sensor_realign_task.done():
             return
 
         async def _run():
             try:
-                await self._async_realign_real_target_from_sensor()
+                await self._async_realign_real_target_from_sensor(retry=retry)
             finally:
                 self._sensor_realign_task = None
 
@@ -923,7 +923,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             return True
         return False
 
-    async def _async_realign_real_target_from_sensor(self) -> None:
+    async def _async_realign_real_target_from_sensor(self, retry: bool = False) -> None:
         """Push a new target temperature to the real thermostat based on the active sensor."""
 
         if self._virtual_target_temperature is None:
@@ -1012,9 +1012,13 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             if self._has_pending_real_target_request(desired_real_target, pending_tolerance):
                 return
 
+            reason = "sensor realignment" + (" (overdrive)" if overdrive_active else "")
+            if retry:
+                reason += " (retry)"
+
             await self._async_log_real_adjustment(
                 desired_target=desired_real_target,
-                reason="sensor realignment" + (" (overdrive)" if overdrive_active else ""),
+                reason=reason,
                 virtual_target=self._virtual_target_temperature,
                 sensor_temp=sensor_temp,
                 real_current=real_current,
@@ -1042,7 +1046,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
     def _async_cooldown_retry(self, _now: datetime.datetime) -> None:
         """Retry the alignment after cooldown expires."""
         self._cooldown_timer_unsub = None
-        self._schedule_target_realign()
+        self._schedule_target_realign(retry=True)
 
     async def _async_restore_state(self) -> None:
         last_state = await self.async_get_last_state()
