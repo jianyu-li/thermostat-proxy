@@ -49,7 +49,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, State, callback
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.event import async_track_state_change_event
+from homeassistant.helpers.event import async_call_later, async_track_state_change_event
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
@@ -299,6 +299,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self._command_lock = asyncio.Lock()
         self._sensor_realign_task: asyncio.Task | None = None
         self._suppress_sync_logs_until: float | None = None
+        self._cooldown_timer_unsub: Callable[[], None] | None = None
 
     async def async_added_to_hass(self) -> None:
         """Finish setup when entity is added."""
@@ -353,6 +354,9 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         await super().async_will_remove_from_hass()
         if self._sensor_realign_task and not self._sensor_realign_task.done():
             self._sensor_realign_task.cancel()
+        if self._cooldown_timer_unsub:
+            self._cooldown_timer_unsub()
+            self._cooldown_timer_unsub = None
         while self._unsub_listeners:
             unsubscribe = self._unsub_listeners.pop()
             unsubscribe()
@@ -927,8 +931,24 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             
         now = time.monotonic()
         if self._cooldown_period > 0:
-            if now - self._last_real_write_time < self._cooldown_period:
+            time_since_last_write = now - self._last_real_write_time
+            if time_since_last_write < self._cooldown_period:
+                if self._cooldown_timer_unsub is None:
+                    retry_delay = self._cooldown_period - time_since_last_write
+                    _LOGGER.info(
+                        "Update blocked by cooldown (%.1fs remaining). Scheduling retry in %.1fs",
+                        self._cooldown_period - time_since_last_write,
+                        retry_delay,
+                    )
+                    self._cooldown_timer_unsub = async_call_later(
+                        self.hass, retry_delay, self._async_cooldown_retry
+                    )
                 return
+        
+        # If we proceed, clear any pending retry since we are acting now
+        if self._cooldown_timer_unsub:
+            self._cooldown_timer_unsub()
+            self._cooldown_timer_unsub = None
 
         async with self._command_lock:
             sensor_temp = self._get_active_sensor_temperature()
@@ -1018,6 +1038,11 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             self._last_real_write_time = time.monotonic()
             self._start_auto_sync_log_suppression()
 
+    @callback
+    def _async_cooldown_retry(self, _now: datetime.datetime) -> None:
+        """Retry the alignment after cooldown expires."""
+        self._cooldown_timer_unsub = None
+        self._schedule_target_realign()
 
     async def _async_restore_state(self) -> None:
         last_state = await self.async_get_last_state()
