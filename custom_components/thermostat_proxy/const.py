@@ -18,6 +18,8 @@ CONF_USE_LAST_ACTIVE_SENSOR = "use_last_active_sensor"
 CONF_UNIQUE_ID = "unique_id"
 CONF_PHYSICAL_SENSOR_NAME = "physical_sensor_name"
 CONF_COOLDOWN_PERIOD = "cooldown_period"
+CONF_MIN_TEMP = "min_temp"
+CONF_MAX_TEMP = "max_temp"
 
 DEFAULT_COOLDOWN_PERIOD = 0
 

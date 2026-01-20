@@ -47,7 +47,9 @@
         "data": {
           "physical_sensor_name": "Physical thermostat preset name",
           "default_sensor": "Default sensor",
-          "cooldown_period": "Minimum adjustment interval (seconds)"
+          "cooldown_period": "Minimum adjustment interval (seconds)",
+          "min_temp": "Minimum safe temperature limit (set to 0 to disable)",
+          "max_temp": "Maximum safe temperature limit (set to 0 to disable)"
         }
       }
     },
@@ -58,7 +60,8 @@
       "no_sensors": "Add at least one sensor before finishing.",
       "invalid_default_sensor": "Select a sensor from the list.",
       "physical_name_conflict": "Choose a different name for the physical thermostat preset.",
-      "already_configured": "This unique ID is already in use."
+      "already_configured": "This unique ID is already in use.",
+      "invalid_temp_range": "Minimum temperature must be less than maximum temperature."
     },
     "abort": {
       "reconfigure_successful": "Configuration updated.",
@@ -71,12 +74,15 @@
         "title": "Thermostat Proxy options",
         "data": {
           "default_sensor": "Default sensor",
-          "cooldown_period": "Minimum adjustment interval (seconds)"
+          "cooldown_period": "Minimum adjustment interval (seconds)",
+          "min_temp": "Minimum safe temperature limit (set to 0 to disable)",
+          "max_temp": "Maximum safe temperature limit (set to 0 to disable)"
         }
       }
     },
     "error": {
-      "invalid_default_sensor": "Select a sensor from the list."
+      "invalid_default_sensor": "Select a sensor from the list.",
+      "invalid_temp_range": "Minimum temperature must be less than maximum temperature."
     }
   }
 }

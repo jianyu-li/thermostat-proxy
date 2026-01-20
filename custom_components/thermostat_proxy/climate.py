@@ -77,6 +77,8 @@ from .const import (
     CONF_USE_LAST_ACTIVE_SENSOR,
     CONF_COOLDOWN_PERIOD,
     DEFAULT_COOLDOWN_PERIOD,
+    CONF_MIN_TEMP,
+    CONF_MAX_TEMP,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -103,6 +105,8 @@ _RESERVED_REAL_ATTRIBUTES = {
     "fan_mode",
     "fan_modes",
     "current_humidity",
+    "min_temp",
+    "max_temp",
 }
 
 SENSOR_SCHEMA = vol.Schema(
@@ -124,6 +128,8 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
         vol.Optional(CONF_COOLDOWN_PERIOD, default=DEFAULT_COOLDOWN_PERIOD): vol.All(
             cv.time_period, cv.positive_timedelta
         ),
+        vol.Optional(CONF_MIN_TEMP): vol.Coerce(float),
+        vol.Optional(CONF_MAX_TEMP): vol.Coerce(float),
     }
 )
 
@@ -156,6 +162,8 @@ async def async_setup_platform(
                 ),
                 use_last_active_sensor=use_last_active_sensor,
                 cooldown_period=config.get(CONF_COOLDOWN_PERIOD, DEFAULT_COOLDOWN_PERIOD),
+                user_min_temp=config.get(CONF_MIN_TEMP),
+                user_max_temp=config.get(CONF_MAX_TEMP),
             )
         ]
     )
@@ -191,6 +199,14 @@ async def async_setup_entry(
         CONF_COOLDOWN_PERIOD,
         data.get(CONF_COOLDOWN_PERIOD, DEFAULT_COOLDOWN_PERIOD),
     )
+    user_min_temp = entry.options.get(
+        CONF_MIN_TEMP,
+        data.get(CONF_MIN_TEMP),
+    )
+    user_max_temp = entry.options.get(
+        CONF_MAX_TEMP,
+        data.get(CONF_MAX_TEMP),
+    )
 
     if raw_default_sensor == DEFAULT_SENSOR_LAST_ACTIVE:
         use_last_active_sensor = True
@@ -218,6 +234,8 @@ async def async_setup_entry(
                 physical_sensor_name=physical_sensor_name,
                 use_last_active_sensor=use_last_active_sensor,
                 cooldown_period=cooldown_period,
+                user_min_temp=user_min_temp,
+                user_max_temp=user_max_temp,
             )
         ]
     )
@@ -248,6 +266,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         physical_sensor_name: str | None,
         use_last_active_sensor: bool,
         cooldown_period: float | int | datetime.timedelta = 0,
+        user_min_temp: float | None = None,
+        user_max_temp: float | None = None,
     ) -> None:
         self.hass = hass
         if isinstance(cooldown_period, (int, float)):
@@ -290,6 +310,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self._unsub_listeners: list[Callable[[], None]] = []
         self._min_temp: float | None = None
         self._max_temp: float | None = None
+        self._user_min_temp: float | None = user_min_temp
+        self._user_max_temp: float | None = user_max_temp
         self._target_temp_step: float | None = None
         self._precision_override: float | None = None
         self._entity_health: dict[str, bool] = {}
@@ -567,12 +589,16 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
     @property
     def min_temp(self) -> float:
+        if self._user_min_temp is not None:
+            return self._user_min_temp
         if self._min_temp is not None:
             return self._min_temp
         return super().min_temp
 
     @property
     def max_temp(self) -> float:
+        if self._user_max_temp is not None:
+            return self._user_max_temp
         if self._max_temp is not None:
             return self._max_temp
         return super().max_temp
@@ -706,7 +732,15 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 return
 
             delta = constrained_target - display_current
-            real_target = self._apply_target_constraints(real_current + delta)
+            calculated_real_target = real_current + delta
+            real_target = self._apply_safety_clamp(calculated_real_target)
+            if real_target is None:
+                _LOGGER.warning(
+                    "Cannot set temperature for %s: safety clamp returned None",
+                    self.entity_id,
+                )
+                return
+            real_target = self._apply_target_constraints(real_target)
             payload = {
                 ATTR_ENTITY_ID: self._real_entity_id,
                 ATTR_TEMPERATURE: real_target,
@@ -954,10 +988,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 return
 
             delta = self._virtual_target_temperature - sensor_temp
-            desired_real_target = self._apply_target_constraints(real_current + delta)
-            if desired_real_target is None:
-                return
-
+            calculated_real_target = real_current + delta
+            
             # Overdrive Logic: Check if we are stalled
             # Stalled = Target not met AND Real Thermostat is Idle
             overdrive_active = False
@@ -990,7 +1022,12 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                          _LOGGER.info("Overdrive active: Cooling required but thermostat idle. Applying %s offset.", overdrive_adjust)
             
             if overdrive_active:
-                desired_real_target = self._apply_target_constraints(desired_real_target + overdrive_adjust)
+                calculated_real_target = calculated_real_target + overdrive_adjust
+            
+            desired_real_target = self._apply_safety_clamp(calculated_real_target)
+            if desired_real_target is None:
+                return
+            desired_real_target = self._apply_target_constraints(desired_real_target)
 
             current_real_target = self._get_real_target_temperature()
             # We must be strict here; if the step is 1.0, 66 vs 67 must be seen as different.
@@ -1159,6 +1196,62 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         if max_temp is not None:
             result = min(result, max_temp)
         return self._round_temperature(result)
+
+    def _apply_safety_clamp(self, calculated_target: float | None) -> float | None:
+        """Apply user-configured safety limits, falling back to physical thermostat limits."""
+        if calculated_target is None:
+            return None
+        
+        original_target = calculated_target
+        clamped = False
+        clamp_reason = None
+        limit_value = None
+        
+        effective_min = self._user_min_temp if self._user_min_temp is not None else self._min_temp
+        effective_max = self._user_max_temp if self._user_max_temp is not None else self._max_temp
+        
+        if effective_min is not None and effective_max is not None and effective_min > effective_max:
+            _LOGGER.error(
+                "Thermostat Proxy (%s): Invalid configuration - min_temp (%.1f) > max_temp (%.1f). "
+                "Using max_temp as safety limit.",
+                self.entity_id,
+                effective_min,
+                effective_max,
+            )
+            return effective_max
+        
+        if effective_min is not None and calculated_target < effective_min:
+            calculated_target = effective_min
+            clamped = True
+            clamp_reason = "min"
+            limit_value = effective_min
+        elif effective_max is not None and calculated_target > effective_max:
+            calculated_target = effective_max
+            clamped = True
+            clamp_reason = "max"
+            limit_value = effective_max
+        
+        if clamped:
+            unit = self.temperature_unit or ""
+            limit_source = "user-configured" if (
+                (clamp_reason == "max" and self._user_max_temp is not None) or
+                (clamp_reason == "min" and self._user_min_temp is not None)
+            ) else "physical thermostat"
+            
+            _LOGGER.warning(
+                "Thermostat Proxy (%s): Calculated target %.1f%s exceeded %s limit %.1f%s. Clamping to %.1f%s (source: %s)",
+                self.entity_id,
+                original_target,
+                unit,
+                clamp_reason,
+                limit_value,
+                unit,
+                calculated_target,
+                unit,
+                limit_source,
+            )
+        
+        return calculated_target
 
     def _round_temperature(self, value: float) -> float:
         precision = self.precision or DEFAULT_PRECISION
