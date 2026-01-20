@@ -25,7 +25,7 @@ A Home Assistant custom integration that lets you expose a virtual `climate` ent
 - "Overdrive" logic: If the remote sensor hasn't reached the target but the physical thermostat thinks it's done (e.g. goes "Idle"), the proxy will temporarily offset the real target by an additional degree to force the HVAC to keep running until the remote sensor is satisfied.
 - **Fan Mode Support**: Fully proxies the real thermostat's fan modes. You can control the fan (Auto/On/Low/etc.) seamlessly through the proxy entity.
 - **User Log Attribution**: Logbook entries for target temperature or preset changes will show which user performed the action.
-- **Safety Limits**: Configure custom `min_temp` and `max_temp` bounds. Calculated targets are clamped to these limits to prevent extreme requests due to sensor anomalies.
+- **Safety Limits**: Configure custom `min_temp` and `max_temp` bounds. Calculated targets are clamped to these limits to prevent extreme requests due to sensor anomalies or to respect operational restrictions enforced by certain thermostats that aren't exposed through their Home Assistant attributes.
 - Default sensor selector includes a "Last active sensor" option (during setup or in options) so the proxy resumes with the most recently selected sensor instead of the configured default.
 
 ## Configuration
@@ -46,7 +46,7 @@ A Home Assistant custom integration that lets you expose a virtual `climate` ent
 - `preset_modes` is populated with the configured sensor names. Calling `climate.set_preset_mode` switches the sensor.
 - When you call `climate.set_temperature` on the custom entity, it calculates `delta = requested_temp - displayed_current_temp` and then sets the real thermostat to `real_current_temp + delta`. A two-degree increase relative to the virtual sensor becomes a two-degree increase on the physical thermostat, for example.
 - **Overdrive**: If the virtual target is not met (e.g., set to 70, sensor reads 69), but the physical thermostat (satisfied at its own location) goes Idle, the integration detects this "Stall". It then applies a +1° (or -1° for cooling) "Overdrive" offset to the physical thermostat's target to force it to run. This offset sticks until the virtual target is met or the system is no longer stalled.
-- Requested targets are clamped to the physical thermostat’s `min_temp`, `max_temp`, and `target_temp_step` so automations can’t push the hardware outside its supported range.
+- **Safety Clamping**: Calculated targets are first clamped to user-configured `min_temp` and `max_temp` safety limits (if set), then further constrained to the physical thermostat's `min_temp`, `max_temp`, and `target_temp_step`. This dual-layer protection prevents extreme values from sensor anomalies. Configuring explicit safety limits is useful for certain thermostats that enforce additional operational restrictions not exposed through their Home Assistant attributes.
 - If the physical thermostat’s target changes outside of this integration, the proxy moves to the physical preset and aligns its virtual target with the real target.
 - All attributes from the physical thermostat are forwarded as extra attributes, alongside:
   - `active_sensor`
