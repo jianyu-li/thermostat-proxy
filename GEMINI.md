@@ -12,6 +12,9 @@ The core logic involves calculating the difference (delta) between the selected 
 *   **Sensor Switching:** Maps configured temperature sensors to `preset_modes`. Switching the preset changes the active control sensor.
 *   **Offset Logic:** Automatically adjusts the physical thermostat to achieve the target temperature at the remote sensor's location.
 *   **Overdrive Mode:** Detects if the physical thermostat is "satisfied" (Idle) while the remote sensor is not, and applies an extra offset to force the system to run.
+*   **Safety Limits:** Allows user-configurable `min_temp` and `max_temp` to prevent extreme target setpoints being sent to the physical hardware.
+*   **Fan Mode Support:** Seamlessly proxies and controls the physical thermostat's fan modes.
+*   **Last Active Sensor:** Option to resume with the most recently selected sensor instead of a fixed default.
 *   **Fallback:** Automatically reverts to the physical thermostat's internal sensor if the remote sensor becomes unavailable.
 *   **Logbook Attribution:** Tracks which user changed the target temperature or preset.
 *   **Configuration:** Fully supports UI-based configuration via Config Flow (add/remove sensors, rename presets, etc.).
