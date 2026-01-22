@@ -87,6 +87,7 @@ DEFAULT_PRECISION = 0.1
 PENDING_REQUEST_TOLERANCE_MIN = 0.05
 PENDING_REQUEST_TOLERANCE_MAX = 0.5
 MAX_TRACKED_REAL_TARGET_REQUESTS = 5
+PENDING_REQUEST_TIMEOUT = 30.0  # Seconds before a pending request expires
 
 # Attributes supplied by ClimateEntity itself that must NOT be overridden by
 # forwarding the physical thermostat's attributes, otherwise the front-end sees
@@ -305,7 +306,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self._temperature_unit: str | None = None
         self._real_state: State | None = None
         self._last_requested_real_target: float | None = None
-        self._recent_real_target_requests: list[float] = []
+        self._recent_real_target_requests: list[tuple[float, float]] = []  # (target, timestamp)
         self._last_real_target_temp: float | None = None
         self._unsub_listeners: list[Callable[[], None]] = []
         self._min_temp: float | None = None
@@ -396,8 +397,18 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         if real_target is not None:
             previous_real_target = self._last_real_target_temp
             self._last_real_target_temp = real_target
-            pending_tolerance = self._pending_request_tolerance()
-            if self._consume_real_target_request(real_target, pending_tolerance):
+            strict_tolerance = self._pending_request_tolerance()
+            # Two-tiered matching: strict consumes, loose suppresses.
+            # This handles thermostats (e.g., Nest) that report intermediate
+            # target values before settling on the final one.
+            if self._consume_real_target_request(real_target, strict_tolerance):
+                # Strict match: this is the final settled value we requested.
+                pass
+            elif self._has_pending_real_target_request(
+                real_target, PENDING_REQUEST_TOLERANCE_MAX
+            ):
+                # Loose match: intermediate value near a pending request.
+                # Suppress external change detection but do NOT consume.
                 pass
             elif previous_real_target is not None and not math.isclose(
                 real_target, previous_real_target, abs_tol=DEFAULT_PRECISION
@@ -456,7 +467,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         """Track target values we have explicitly requested from the thermostat."""
 
         self._last_requested_real_target = real_target
-        self._recent_real_target_requests.append(real_target)
+        self._recent_real_target_requests.append((real_target, time.monotonic()))
         if len(self._recent_real_target_requests) > MAX_TRACKED_REAL_TARGET_REQUESTS:
             self._recent_real_target_requests.pop(0)
 
@@ -473,24 +484,39 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         """Remove a pending request after failures so we don't ignore real updates."""
 
         tolerance = self._pending_request_tolerance()
-        for index, pending in enumerate(self._recent_real_target_requests):
+        for index, (pending, _ts) in enumerate(self._recent_real_target_requests):
             if math.isclose(real_target, pending, abs_tol=tolerance):
                 del self._recent_real_target_requests[index]
                 break
         if self._recent_real_target_requests:
-            self._last_requested_real_target = self._recent_real_target_requests[-1]
+            self._last_requested_real_target = self._recent_real_target_requests[-1][0]
+        else:
+            self._last_requested_real_target = None
+
+    def _cleanup_expired_pending_requests(self) -> None:
+        """Remove pending requests older than PENDING_REQUEST_TIMEOUT."""
+
+        now = time.monotonic()
+        self._recent_real_target_requests = [
+            (target, ts)
+            for target, ts in self._recent_real_target_requests
+            if now - ts < PENDING_REQUEST_TIMEOUT
+        ]
+        if self._recent_real_target_requests:
+            self._last_requested_real_target = self._recent_real_target_requests[-1][0]
         else:
             self._last_requested_real_target = None
 
     def _consume_real_target_request(self, real_target: float, tolerance: float) -> bool:
         """Return True if a state update matches one of our pending requests."""
 
-        for index, pending in enumerate(self._recent_real_target_requests):
+        self._cleanup_expired_pending_requests()
+        for index, (pending, _ts) in enumerate(self._recent_real_target_requests):
             if math.isclose(real_target, pending, abs_tol=tolerance):
                 del self._recent_real_target_requests[index]
                 if self._recent_real_target_requests:
                     self._last_requested_real_target = (
-                        self._recent_real_target_requests[-1]
+                        self._recent_real_target_requests[-1][0]
                     )
                 else:
                     self._last_requested_real_target = None
@@ -502,9 +528,10 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
     ) -> bool:
         """Return True if we've already asked the thermostat for this target."""
 
+        self._cleanup_expired_pending_requests()
         return any(
             math.isclose(real_target, pending, abs_tol=tolerance)
-            for pending in self._recent_real_target_requests
+            for pending, _ts in self._recent_real_target_requests
         )
 
     def _discover_temperature_unit(self) -> str:
