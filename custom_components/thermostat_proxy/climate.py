@@ -88,6 +88,8 @@ PENDING_REQUEST_TOLERANCE_MIN = 0.05
 PENDING_REQUEST_TOLERANCE_MAX = 0.5
 MAX_TRACKED_REAL_TARGET_REQUESTS = 5
 PENDING_REQUEST_TIMEOUT = 30.0  # Seconds before a pending request expires
+EXTERNAL_CHANGE_TOLERANCE = 0.2  # Degrees to ignore as noise/rounding for external detection
+POST_WRITE_GRACE_PERIOD = 10.0  # Seconds to ignore external changes after a write
 
 # Attributes supplied by ClimateEntity itself that must NOT be overridden by
 # forwarding the physical thermostat's attributes, otherwise the front-end sees
@@ -385,6 +387,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
     def _async_handle_real_state_event(self, event) -> None:
         """Handle updates to the linked thermostat."""
 
+        old_state: State | None = event.data.get("old_state")
         new_state: State | None = event.data.get("new_state")
         self._real_state = new_state
         self._update_real_temperature_limits()
@@ -394,26 +397,61 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
         self._temperature_unit = self._discover_temperature_unit()
         real_target = self._get_real_target_temperature()
+
+        # Check if the device just became available or switched from Off
+        was_not_controlling = old_state is None or old_state.state in (
+            STATE_UNAVAILABLE,
+            STATE_UNKNOWN,
+            HVACMode.OFF,
+        )
+
         if real_target is not None:
             previous_real_target = self._last_real_target_temp
             self._last_real_target_temp = real_target
             strict_tolerance = self._pending_request_tolerance()
+
             # Two-tiered matching: strict consumes, loose suppresses.
-            # This handles thermostats (e.g., Nest) that report intermediate
-            # target values before settling on the final one.
             if self._consume_real_target_request(real_target, strict_tolerance):
-                # Strict match: this is the final settled value we requested.
-                pass
+                _LOGGER.debug(
+                    "Real target %s matched pending request (strict)", real_target
+                )
             elif self._has_pending_real_target_request(
                 real_target, PENDING_REQUEST_TOLERANCE_MAX
             ):
-                # Loose match: intermediate value near a pending request.
-                # Suppress external change detection but do NOT consume.
-                pass
-            elif previous_real_target is not None and not math.isclose(
-                real_target, previous_real_target, abs_tol=DEFAULT_PRECISION
-            ):
-                self._handle_external_real_target_change(real_target)
+                _LOGGER.debug(
+                    "Real target %s matched pending request (loose) - ignoring potential external change",
+                    real_target,
+                )
+            elif previous_real_target is not None:
+                # Compare to last known target
+                time_since_write = time.monotonic() - self._last_real_write_time
+                is_recent_write = time_since_write < POST_WRITE_GRACE_PERIOD
+
+                if was_not_controlling:
+                    _LOGGER.debug(
+                        "Thermostat returned to active state; updated target to %s without triggering external change",
+                        real_target,
+                    )
+                elif is_recent_write:
+                    _LOGGER.debug(
+                        "Real target %s changed during post-write grace period (%.1fs < %.1fs) - ignoring potential echo",
+                        real_target,
+                        time_since_write,
+                        POST_WRITE_GRACE_PERIOD,
+                    )
+                elif not math.isclose(
+                    real_target, previous_real_target, abs_tol=EXTERNAL_CHANGE_TOLERANCE
+                ):
+                    _LOGGER.info(
+                        "Detected potential external change: %s -> %s (tolerance %s)",
+                        previous_real_target,
+                        real_target,
+                        EXTERNAL_CHANGE_TOLERANCE,
+                    )
+                    self._handle_external_real_target_change(real_target)
+            else:
+                _LOGGER.debug("Initial real target captured: %s", real_target)
+
         self._schedule_target_realign()
         self.async_write_ha_state()
 
@@ -1084,6 +1122,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 sensor_temp=sensor_temp,
                 real_current=real_current,
                 actor_name=None,
+                overdrive_adjust=overdrive_adjust if overdrive_active else None,
             )
             self._record_real_target_request(desired_real_target)
             try:
@@ -1096,9 +1135,21 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     },
                     blocking=True,
                 )
-            except Exception:
+            except Exception as err:
                 self._remove_real_target_request(desired_real_target)
-                raise
+                if "502" in str(err) or "Bad Gateway" in str(err):
+                    _LOGGER.warning(
+                        "Failed to set temperature on %s (502 Bad Gateway) - will retry on next sync",
+                        self._real_entity_id,
+                    )
+                else:
+                    _LOGGER.error(
+                        "Error setting %s temperature to %s: %s",
+                        self._real_entity_id,
+                        desired_real_target,
+                        err,
+                    )
+                return
             self._last_real_target_temp = desired_real_target
             self._last_real_write_time = time.monotonic()
             self._start_auto_sync_log_suppression()
@@ -1320,6 +1371,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         sensor_temp: float | None,
         real_current: float | None,
         actor_name: str | None = None,
+        overdrive_adjust: float | None = None,
     ) -> None:
         if desired_target is None:
             return
@@ -1348,6 +1400,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 virtual_val,
                 desired_val,
                 unit,
+                overdrive_adjust,
             )
             if real_math:
                 segments.append(real_math)
@@ -1402,6 +1455,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         virtual_val: int | None,
         desired_val: int | None,
         unit: str,
+        overdrive_adjust: float | None = None,
     ) -> str | None:
         if (
             real_val is None
@@ -1417,6 +1471,10 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             op = "+"
             delta = abs(diff)
         result = desired_val if desired_val is not None else real_val - diff
+        if overdrive_adjust:
+            round_adjust = int(round(overdrive_adjust))
+            op_adj = "+" if round_adjust >= 0 else "-"
+            return f"{real_val}{unit} {op} {delta}{unit} ({op_adj}{abs(round_adjust)} overdrive) = {result}{unit}"
         return f"{real_val}{unit} {op} {delta}{unit} = {result}{unit}"
 
     def _format_math_real_to_virtual(
