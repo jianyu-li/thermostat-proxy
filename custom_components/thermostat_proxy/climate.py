@@ -1126,6 +1126,10 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             )
             self._record_real_target_request(desired_real_target)
             try:
+                # Optimistic update to prevent race conditions (echo events)
+                previous_real_target = self._last_real_target_temp
+                previous_write_time = self._last_real_write_time
+                
                 self._last_real_target_temp = desired_real_target
                 self._last_real_write_time = time.monotonic()
                 self._start_auto_sync_log_suppression()
@@ -1140,7 +1144,11 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     blocking=True,
                 )
             except Exception as err:
+                # Rollback state on failure to maintain consistency
+                self._last_real_target_temp = previous_real_target
+                self._last_real_write_time = previous_write_time
                 self._remove_real_target_request(desired_real_target)
+                
                 if "502" in str(err) or "Bad Gateway" in str(err):
                     _LOGGER.warning(
                         "Failed to set temperature on %s (502 Bad Gateway) - will retry on next sync",
