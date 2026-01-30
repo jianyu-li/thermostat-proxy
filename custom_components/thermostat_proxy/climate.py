@@ -1129,6 +1129,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 # Optimistic update to prevent race conditions (echo events)
                 previous_real_target = self._last_real_target_temp
                 previous_write_time = self._last_real_write_time
+                previous_suppress_logs = self._suppress_sync_logs_until
                 
                 self._last_real_target_temp = desired_real_target
                 self._last_real_write_time = time.monotonic()
@@ -1147,6 +1148,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 # Rollback state on failure to maintain consistency
                 self._last_real_target_temp = previous_real_target
                 self._last_real_write_time = previous_write_time
+                self._suppress_sync_logs_until = previous_suppress_logs
                 self._remove_real_target_request(desired_real_target)
                 
                 if "502" in str(err) or "Bad Gateway" in str(err):
