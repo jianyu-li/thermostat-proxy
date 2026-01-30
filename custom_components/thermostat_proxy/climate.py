@@ -1126,6 +1126,10 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             )
             self._record_real_target_request(desired_real_target)
             try:
+                self._last_real_target_temp = desired_real_target
+                self._last_real_write_time = time.monotonic()
+                self._start_auto_sync_log_suppression()
+
                 await self.hass.services.async_call(
                     CLIMATE_DOMAIN,
                     SERVICE_SET_TEMPERATURE,
@@ -1149,10 +1153,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                         desired_real_target,
                         err,
                     )
-                return
-            self._last_real_target_temp = desired_real_target
-            self._last_real_write_time = time.monotonic()
-            self._start_auto_sync_log_suppression()
+
 
     @callback
     def _async_cooldown_retry(self, _now: datetime.datetime) -> None:
