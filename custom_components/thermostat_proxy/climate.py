@@ -824,6 +824,15 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             )
             self._record_real_target_request(real_target)
             try:
+                # Optimistic update to prevent race conditions (echo events)
+                previous_real_target = self._last_real_target_temp
+                previous_write_time = self._last_real_write_time
+                previous_suppress_logs = self._suppress_sync_logs_until
+                
+                self._last_real_target_temp = real_target
+                self._last_real_write_time = time.monotonic()
+                self._start_auto_sync_log_suppression()
+                
                 await self.hass.services.async_call(
                     CLIMATE_DOMAIN,
                     SERVICE_SET_TEMPERATURE,
@@ -831,12 +840,14 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     blocking=True,
                 )
             except Exception:
+                 # Rollback state on failure
+                self._last_real_target_temp = previous_real_target
+                self._last_real_write_time = previous_write_time
+                self._suppress_sync_logs_until = previous_suppress_logs
                 self._remove_real_target_request(real_target)
                 raise
 
             self._virtual_target_temperature = constrained_target
-            self._last_real_write_time = time.monotonic()
-            self._start_auto_sync_log_suppression()
             self.async_write_ha_state()
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
