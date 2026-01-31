@@ -825,9 +825,11 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             self._record_real_target_request(real_target)
             try:
                 # Optimistic update to prevent race conditions (echo events)
-                previous_real_target = self._last_real_target_temp
-                previous_write_time = self._last_real_write_time
-                previous_suppress_logs = self._suppress_sync_logs_until
+                previous_state = (
+                    self._last_real_target_temp,
+                    self._last_real_write_time,
+                    self._suppress_sync_logs_until,
+                )
                 
                 self._last_real_target_temp = real_target
                 self._last_real_write_time = time.monotonic()
@@ -841,9 +843,11 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 )
             except Exception:
                  # Rollback state on failure
-                self._last_real_target_temp = previous_real_target
-                self._last_real_write_time = previous_write_time
-                self._suppress_sync_logs_until = previous_suppress_logs
+                (
+                    self._last_real_target_temp,
+                    self._last_real_write_time,
+                    self._suppress_sync_logs_until,
+                ) = previous_state
                 self._remove_real_target_request(real_target)
                 raise
 
@@ -1138,9 +1142,11 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             self._record_real_target_request(desired_real_target)
             try:
                 # Optimistic update to prevent race conditions (echo events)
-                previous_real_target = self._last_real_target_temp
-                previous_write_time = self._last_real_write_time
-                previous_suppress_logs = self._suppress_sync_logs_until
+                previous_state = (
+                    self._last_real_target_temp,
+                    self._last_real_write_time,
+                    self._suppress_sync_logs_until,
+                )
                 
                 self._last_real_target_temp = desired_real_target
                 self._last_real_write_time = time.monotonic()
@@ -1157,9 +1163,11 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 )
             except Exception as err:
                 # Rollback state on failure to maintain consistency
-                self._last_real_target_temp = previous_real_target
-                self._last_real_write_time = previous_write_time
-                self._suppress_sync_logs_until = previous_suppress_logs
+                (
+                    self._last_real_target_temp,
+                    self._last_real_write_time,
+                    self._suppress_sync_logs_until,
+                ) = previous_state
                 self._remove_real_target_request(desired_real_target)
                 
                 if "502" in str(err) or "Bad Gateway" in str(err):
