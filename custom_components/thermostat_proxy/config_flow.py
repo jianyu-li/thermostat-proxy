@@ -29,6 +29,7 @@ from .const import (
     DEFAULT_COOLDOWN_PERIOD,
     CONF_MIN_TEMP,
     CONF_MAX_TEMP,
+    CONF_SINGLE_SOURCE_OF_TRUTH,
 )
 
 SENSOR_STEP = "sensors"
@@ -60,6 +61,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._cooldown_period: int = DEFAULT_COOLDOWN_PERIOD
         self._min_temp: float | None = None
         self._max_temp: float | None = None
+        self._single_source_of_truth: bool = False
         self._reconfigure_entry: config_entries.ConfigEntry | None = None
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None):
@@ -125,6 +127,9 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
         self._min_temp = entry.data.get(CONF_MIN_TEMP)
         self._max_temp = entry.data.get(CONF_MAX_TEMP)
+        self._single_source_of_truth = entry.data.get(
+            CONF_SINGLE_SOURCE_OF_TRUTH, False
+        )
         self._use_last_active_sensor = entry.data.get(
             CONF_USE_LAST_ACTIVE_SENSOR, False
         )
@@ -310,6 +315,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             cooldown_period = user_input.get(CONF_COOLDOWN_PERIOD, DEFAULT_COOLDOWN_PERIOD)
             min_temp = user_input.get(CONF_MIN_TEMP) or None
             max_temp = user_input.get(CONF_MAX_TEMP) or None
+            single_source_of_truth = user_input.get(CONF_SINGLE_SOURCE_OF_TRUTH, False)
 
             if any(
                 physical_sensor_name.lower() == sensor_name.lower()
@@ -336,6 +342,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._cooldown_period = cooldown_period
                 self._min_temp = min_temp
                 self._max_temp = max_temp
+                self._single_source_of_truth = single_source_of_truth
                 self._use_last_active_sensor = use_last_active_sensor
 
                 sensor_names_with_physical = list(sensor_names)
@@ -350,6 +357,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_USE_LAST_ACTIVE_SENSOR: self._use_last_active_sensor,
                     CONF_MIN_TEMP: min_temp,
                     CONF_MAX_TEMP: max_temp,
+                    CONF_SINGLE_SOURCE_OF_TRUTH: single_source_of_truth,
                 }
                 if self._use_last_active_sensor:
                     data[CONF_DEFAULT_SENSOR] = DEFAULT_SENSOR_LAST_ACTIVE
@@ -400,6 +408,11 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         
         schema_fields[vol.Optional(CONF_MIN_TEMP, default=min_temp_default)] = number_selector
         schema_fields[vol.Optional(CONF_MAX_TEMP, default=max_temp_default)] = number_selector
+        schema_fields[
+            vol.Optional(
+                CONF_SINGLE_SOURCE_OF_TRUTH, default=self._single_source_of_truth
+            )
+        ] = selector.BooleanSelector()
 
         if sensor_names:
             default_options = [
@@ -489,6 +502,10 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
             CONF_MAX_TEMP,
             self.config_entry.data.get(CONF_MAX_TEMP),
         )
+        current_single_source_of_truth = self.config_entry.options.get(
+            CONF_SINGLE_SOURCE_OF_TRUTH,
+            self.config_entry.data.get(CONF_SINGLE_SOURCE_OF_TRUTH, False),
+        )
 
         if current_default == DEFAULT_SENSOR_LAST_ACTIVE:
             use_last_active_sensor = True
@@ -517,7 +534,8 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
                 data[CONF_COOLDOWN_PERIOD] = user_input.get(CONF_COOLDOWN_PERIOD, DEFAULT_COOLDOWN_PERIOD)
                 data[CONF_MIN_TEMP] = min_temp
                 data[CONF_MAX_TEMP] = max_temp
-                
+                data[CONF_SINGLE_SOURCE_OF_TRUTH] = user_input.get(CONF_SINGLE_SOURCE_OF_TRUTH, False)
+
                 return self.async_create_entry(title="", data=data)
 
         schema_fields: dict[Any, Any] = {}
@@ -562,6 +580,12 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
         
         schema_fields[vol.Optional(CONF_MIN_TEMP, default=min_temp_default)] = number_selector
         schema_fields[vol.Optional(CONF_MAX_TEMP, default=max_temp_default)] = number_selector
+        schema_fields[
+            vol.Optional(
+                CONF_SINGLE_SOURCE_OF_TRUTH,
+                default=current_single_source_of_truth,
+            )
+        ] = selector.BooleanSelector()
 
         data_schema = vol.Schema(schema_fields)
 

@@ -20,6 +20,7 @@ CONF_PHYSICAL_SENSOR_NAME = "physical_sensor_name"
 CONF_COOLDOWN_PERIOD = "cooldown_period"
 CONF_MIN_TEMP = "min_temp"
 CONF_MAX_TEMP = "max_temp"
+CONF_SINGLE_SOURCE_OF_TRUTH = "single_source_of_truth"
 
 DEFAULT_COOLDOWN_PERIOD = 0
 

@@ -79,6 +79,7 @@ from .const import (
     DEFAULT_COOLDOWN_PERIOD,
     CONF_MIN_TEMP,
     CONF_MAX_TEMP,
+    CONF_SINGLE_SOURCE_OF_TRUTH,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -133,6 +134,7 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
         ),
         vol.Optional(CONF_MIN_TEMP): vol.Coerce(float),
         vol.Optional(CONF_MAX_TEMP): vol.Coerce(float),
+        vol.Optional(CONF_SINGLE_SOURCE_OF_TRUTH, default=False): cv.boolean,
     }
 )
 
@@ -167,6 +169,7 @@ async def async_setup_platform(
                 cooldown_period=config.get(CONF_COOLDOWN_PERIOD, DEFAULT_COOLDOWN_PERIOD),
                 user_min_temp=config.get(CONF_MIN_TEMP),
                 user_max_temp=config.get(CONF_MAX_TEMP),
+                single_source_of_truth=config.get(CONF_SINGLE_SOURCE_OF_TRUTH, False),
             )
         ]
     )
@@ -210,6 +213,10 @@ async def async_setup_entry(
         CONF_MAX_TEMP,
         data.get(CONF_MAX_TEMP),
     )
+    single_source_of_truth = entry.options.get(
+        CONF_SINGLE_SOURCE_OF_TRUTH,
+        data.get(CONF_SINGLE_SOURCE_OF_TRUTH, False),
+    )
 
     if raw_default_sensor == DEFAULT_SENSOR_LAST_ACTIVE:
         use_last_active_sensor = True
@@ -239,6 +246,7 @@ async def async_setup_entry(
                 cooldown_period=cooldown_period,
                 user_min_temp=user_min_temp,
                 user_max_temp=user_max_temp,
+                single_source_of_truth=single_source_of_truth,
             )
         ]
     )
@@ -271,6 +279,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         cooldown_period: float | int | datetime.timedelta = 0,
         user_min_temp: float | None = None,
         user_max_temp: float | None = None,
+        single_source_of_truth: bool = False,
     ) -> None:
         self.hass = hass
         if isinstance(cooldown_period, (int, float)):
@@ -322,6 +331,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self._sensor_realign_task: asyncio.Task | None = None
         self._suppress_sync_logs_until: float | None = None
         self._cooldown_timer_unsub: Callable[[], None] | None = None
+        self._single_source_of_truth = single_source_of_truth
+        self._ssot_hvac_mode: str | None = None
 
     async def async_added_to_hass(self) -> None:
         """Finish setup when entity is added."""
@@ -344,6 +355,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 or self._get_active_sensor_temperature()
                 or self._get_real_current_temperature()
             )
+        if self._single_source_of_truth and self._real_state:
+            self._ssot_hvac_mode = self._real_state.state
         await self._async_subscribe_to_states()
 
     async def _async_subscribe_to_states(self) -> None:
@@ -396,6 +409,42 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             return
 
         self._temperature_unit = self._discover_temperature_unit()
+
+        # --- Single Source of Truth: validate external changes ---
+        if (
+            self._single_source_of_truth
+            and old_state is not None
+            and new_state is not None
+            and old_state.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN)
+        ):
+            time_since_write = time.monotonic() - self._last_real_write_time
+            is_likely_our_change = time_since_write < POST_WRITE_GRACE_PERIOD
+
+            if not is_likely_our_change:
+                new_target = _coerce_temperature(
+                    new_state.attributes.get(ATTR_TEMPERATURE)
+                )
+                if new_target is not None and self._has_pending_real_target_request(
+                    new_target, PENDING_REQUEST_TOLERANCE_MAX
+                ):
+                    is_likely_our_change = True
+
+            if not is_likely_our_change:
+                if not self._validate_thermostat_change(old_state, new_state):
+                    _LOGGER.warning(
+                        "Single source of truth: rejected invalid change from %s "
+                        "(multiple simultaneous changes detected)",
+                        self._real_entity_id,
+                    )
+                    self.hass.async_create_task(
+                        self._async_correct_physical_device()
+                    )
+                    self.async_write_ha_state()
+                    return
+                # Valid external change - update SSOT tracked HVAC mode
+                if old_state.state != new_state.state:
+                    self._ssot_hvac_mode = new_state.state
+
         real_target = self._get_real_target_temperature()
 
         # Check if the device just became available or switched from Off
@@ -500,6 +549,145 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self.hass.async_create_task(
             self._async_log_physical_override(real_target, switched)
         )
+
+    def _validate_thermostat_change(
+        self, old_state: State, new_state: State
+    ) -> bool:
+        """Return True if a physical device state change is plausible.
+
+        A person can only make one change at a time: either toggle the HVAC
+        mode *or* adjust the temperature by a single step.  Anything else is
+        treated as line-noise / spurious input.
+        """
+        changes = 0
+
+        # 1. HVAC mode change
+        if old_state.state != new_state.state:
+            changes += 1
+
+        # 2. Target temperature change
+        old_target = _coerce_temperature(
+            old_state.attributes.get(ATTR_TEMPERATURE)
+        )
+        new_target = _coerce_temperature(
+            new_state.attributes.get(ATTR_TEMPERATURE)
+        )
+
+        if old_target is not None and new_target is not None:
+            temp_diff = abs(new_target - old_target)
+            step = self._target_temp_step or 1.0
+            if temp_diff > 0.01:
+                if temp_diff > step + 0.01:
+                    _LOGGER.debug(
+                        "Single source of truth: temperature changed by %.1f "
+                        "(max allowed step: %.1f)",
+                        temp_diff,
+                        step,
+                    )
+                    return False
+                changes += 1
+
+        if changes > 1:
+            _LOGGER.debug(
+                "Single source of truth: %d simultaneous changes detected "
+                "(HVAC mode and temperature)",
+                changes,
+            )
+            return False
+
+        return True
+
+    async def _async_correct_physical_device(self) -> None:
+        """Reset the physical device back to the proxy's known-good state."""
+        corrections: list[str] = []
+
+        # Correct HVAC mode
+        if self._ssot_hvac_mode and self._real_state:
+            try:
+                current_mode = HVACMode(self._real_state.state)
+            except ValueError:
+                current_mode = None
+            try:
+                desired_mode = HVACMode(self._ssot_hvac_mode)
+            except ValueError:
+                desired_mode = None
+
+            if (
+                desired_mode is not None
+                and current_mode is not None
+                and current_mode != desired_mode
+            ):
+                corrections.append(f"hvac_mode={desired_mode.value}")
+                self._last_real_write_time = time.monotonic()
+                try:
+                    await self.hass.services.async_call(
+                        CLIMATE_DOMAIN,
+                        SERVICE_SET_HVAC_MODE,
+                        {
+                            ATTR_ENTITY_ID: self._real_entity_id,
+                            ATTR_HVAC_MODE: desired_mode,
+                        },
+                        blocking=True,
+                    )
+                except Exception as err:
+                    _LOGGER.error(
+                        "Single source of truth: failed to correct HVAC mode "
+                        "on %s: %s",
+                        self._real_entity_id,
+                        err,
+                    )
+
+        # Correct target temperature
+        if self._last_real_target_temp is not None:
+            current_target = self._get_real_target_temperature()
+            if current_target is not None and not math.isclose(
+                current_target, self._last_real_target_temp, abs_tol=0.1
+            ):
+                corrections.append(
+                    f"temperature={self._last_real_target_temp}"
+                )
+                self._record_real_target_request(self._last_real_target_temp)
+                self._last_real_write_time = time.monotonic()
+                try:
+                    await self.hass.services.async_call(
+                        CLIMATE_DOMAIN,
+                        SERVICE_SET_TEMPERATURE,
+                        {
+                            ATTR_ENTITY_ID: self._real_entity_id,
+                            ATTR_TEMPERATURE: self._last_real_target_temp,
+                        },
+                        blocking=True,
+                    )
+                except Exception as err:
+                    self._remove_real_target_request(
+                        self._last_real_target_temp
+                    )
+                    _LOGGER.error(
+                        "Single source of truth: failed to correct "
+                        "temperature on %s: %s",
+                        self._real_entity_id,
+                        err,
+                    )
+
+        if corrections:
+            unit = self.temperature_unit or ""
+            await self.hass.services.async_call(
+                LOGBOOK_DOMAIN,
+                LOGBOOK_SERVICE_LOG,
+                {
+                    "name": self.name,
+                    "entity_id": self.entity_id,
+                    "message": (
+                        "Single source of truth: corrected %s after "
+                        "rejecting invalid input: %s"
+                        % (
+                            self._real_entity_id,
+                            ", ".join(corrections),
+                        )
+                    ),
+                },
+                blocking=False,
+            )
 
     def _record_real_target_request(self, real_target: float) -> None:
         """Track target values we have explicitly requested from the thermostat."""
@@ -855,6 +1043,9 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             self.async_write_ha_state()
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
+        if self._single_source_of_truth:
+            self._ssot_hvac_mode = hvac_mode
+        self._last_real_write_time = time.monotonic()
         await self.hass.services.async_call(
             CLIMATE_DOMAIN,
             SERVICE_SET_HVAC_MODE,
