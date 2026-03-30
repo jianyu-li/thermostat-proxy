@@ -88,7 +88,7 @@ PENDING_REQUEST_TOLERANCE_MIN = 0.05
 PENDING_REQUEST_TOLERANCE_MAX = 0.5
 MAX_TRACKED_REAL_TARGET_REQUESTS = 5
 PENDING_REQUEST_TIMEOUT = 30.0  # Seconds before a pending request expires
-EXTERNAL_CHANGE_TOLERANCE = 0.2  # Degrees to ignore as noise/rounding for external detection
+EXTERNAL_CHANGE_TOLERANCE = 0.55  # Degrees to ignore as noise/rounding for external detection
 POST_WRITE_GRACE_PERIOD = 10.0  # Seconds to ignore external changes after a write
 
 # Attributes supplied by ClimateEntity itself that must NOT be overridden by
@@ -1122,8 +1122,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             ):
                 return
             
-            pending_tolerance = self._pending_request_tolerance()
-            if self._has_pending_real_target_request(desired_real_target, pending_tolerance):
+            if self._has_pending_real_target_request(desired_real_target, target_tolerance):
                 return
 
             reason = "sensor realignment" + (" (overdrive)" if overdrive_active else "")
