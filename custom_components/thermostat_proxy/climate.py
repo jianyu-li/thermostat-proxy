@@ -703,15 +703,22 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
     @property
     def hvac_modes(self) -> list[HVACMode]:
+        """Return the list of available hvac operation modes."""
         if not self._real_state:
             return []
         modes = self._real_state.attributes.get("hvac_modes")
         if not isinstance(modes, list):
             return []
+            
+        # Disallowed dual-setpoint modes that this integration doesn't support
+        disallowed = {HVACMode.AUTO, HVACMode.HEAT_COOL}
+        
         result: list[HVACMode] = []
         for mode in modes:
             try:
-                result.append(HVACMode(mode))
+                hvac_mode = HVACMode(mode)
+                if hvac_mode not in disallowed:
+                    result.append(hvac_mode)
             except ValueError:
                 continue
         return result
