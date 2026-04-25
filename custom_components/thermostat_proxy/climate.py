@@ -20,6 +20,8 @@ from homeassistant.components.climate.const import (
     ATTR_HVAC_MODE,
     ATTR_MAX_TEMP,
     ATTR_MIN_TEMP,
+    ATTR_TARGET_TEMP_HIGH,
+    ATTR_TARGET_TEMP_LOW,
     ATTR_TARGET_TEMP_STEP,
     DOMAIN as CLIMATE_DOMAIN,
     HVACAction,
@@ -96,8 +98,6 @@ POST_WRITE_GRACE_PERIOD = 10.0  # Seconds to ignore external changes after a wri
 # the wrong preset/temperature metadata.
 _RESERVED_REAL_ATTRIBUTES = {
     "temperature",
-    "target_temp_high",
-    "target_temp_low",
     "current_temperature",
     "hvac_modes",
     "hvac_mode",
@@ -111,6 +111,8 @@ _RESERVED_REAL_ATTRIBUTES = {
     "min_temp",
     "max_temp",
 }
+
+UNSUPPORTED_REMOTE_MODES = {HVACMode.AUTO, HVACMode.HEAT_COOL}
 
 SENSOR_SCHEMA = vol.Schema(
     {
@@ -344,6 +346,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 or self._get_active_sensor_temperature()
                 or self._get_real_current_temperature()
             )
+        self._enforce_hvac_mode_restrictions()
         await self._async_subscribe_to_states()
 
     async def _async_subscribe_to_states(self) -> None:
@@ -383,6 +386,43 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             unsubscribe = self._unsub_listeners.pop()
             unsubscribe()
 
+    def _enforce_hvac_mode_restrictions(self, hvac_mode_str: str | None = None) -> None:
+        """Ensure proxy is restricted to the physical sensor if in an unsupported mode."""
+        if not hvac_mode_str and self._real_state:
+            hvac_mode_str = self._real_state.state
+
+        if not hvac_mode_str:
+            return
+
+        try:
+            current_mode = HVACMode(hvac_mode_str)
+        except ValueError:
+            current_mode = None
+
+        if current_mode in UNSUPPORTED_REMOTE_MODES:
+            if self._selected_sensor_name != self._physical_sensor_name:
+                _LOGGER.info(
+                    "Physical thermostat is in %s mode (unsupported for remote sensors); "
+                    "forcing '%s' preset to ensure safety",
+                    hvac_mode_str,
+                    self._physical_sensor_name,
+                )
+                self._selected_sensor_name = self._physical_sensor_name
+
+                async def _log_fallback() -> None:
+                    await self.hass.services.async_call(
+                        LOGBOOK_DOMAIN,
+                        LOGBOOK_SERVICE_LOG,
+                        {
+                            "name": self.name,
+                            "entity_id": self.entity_id,
+                            "message": f"Automatically reverted to '{self._physical_sensor_name}' because '{hvac_mode_str}' mode does not support remote sensors",
+                        },
+                        blocking=False,
+                    )
+
+                self.hass.async_create_task(_log_fallback())
+
     @callback
     def _async_handle_real_state_event(self, event) -> None:
         """Handle updates to the linked thermostat."""
@@ -394,6 +434,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         if not new_state:
             self.async_write_ha_state()
             return
+
+        self._enforce_hvac_mode_restrictions(new_state.state)
 
         self._temperature_unit = self._discover_temperature_unit()
         real_target = self._get_real_target_temperature()
@@ -690,7 +732,22 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
     @property
     def target_temperature(self) -> float | None:
+        if self.hvac_mode in (HVACMode.HEAT_COOL, HVACMode.AUTO):
+             if self.supported_features & ClimateEntityFeature.TARGET_TEMPERATURE_RANGE:
+                 return None
         return self._virtual_target_temperature
+
+    @property
+    def target_temperature_high(self) -> float | None:
+        if not self._real_state:
+            return None
+        return _coerce_temperature(self._real_state.attributes.get("target_temp_high"))
+
+    @property
+    def target_temperature_low(self) -> float | None:
+        if not self._real_state:
+            return None
+        return _coerce_temperature(self._real_state.attributes.get("target_temp_low"))
 
     @property
     def hvac_mode(self) -> HVACMode | None:
@@ -768,6 +825,42 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
         async with self._command_lock:
+            # Handle dual setpoints for range-based modes (Auto/Heat-Cool)
+            high = kwargs.get(ATTR_TARGET_TEMP_HIGH)
+            low = kwargs.get(ATTR_TARGET_TEMP_LOW)
+            
+            if high is not None or low is not None:
+                # Security/Safety: Dual setpoints only allowed on physical sensor
+                if self._selected_sensor_name != self._physical_sensor_name:
+                    _LOGGER.warning("Dual setpoint adjustment only allowed when using physical sensor")
+                    return
+                
+                payload = {ATTR_ENTITY_ID: self._real_entity_id}
+                if high is not None:
+                    payload[ATTR_TARGET_TEMP_HIGH] = self._apply_target_constraints(_coerce_temperature(high))
+                if low is not None:
+                    payload[ATTR_TARGET_TEMP_LOW] = self._apply_target_constraints(_coerce_temperature(low))
+
+                await self.hass.services.async_call(
+                    LOGBOOK_DOMAIN,
+                    LOGBOOK_SERVICE_LOG,
+                    {
+                        "name": self.name,
+                        "entity_id": self.entity_id,
+                        "message": f"Updated dual setpoints: High={payload.get(ATTR_TARGET_TEMP_HIGH)}, Low={payload.get(ATTR_TARGET_TEMP_LOW)}",
+                    },
+                    blocking=False,
+                )
+
+                await self.hass.services.async_call(
+                    CLIMATE_DOMAIN,
+                    SERVICE_SET_TEMPERATURE,
+                    payload,
+                    blocking=True,
+                )
+                self.async_write_ha_state()
+                return
+
             temperature = kwargs.get(ATTR_TEMPERATURE)
             requested = _coerce_temperature(temperature)
             if requested is None:
@@ -885,6 +978,14 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
     async def async_set_preset_mode(self, preset_mode: str) -> None:
         if preset_mode not in self._sensor_lookup:
             raise ValueError(f"Unknown preset '{preset_mode}'")
+
+        if self.hvac_mode in UNSUPPORTED_REMOTE_MODES and preset_mode != self._physical_sensor_name:
+            _LOGGER.warning(
+                "Cannot switch preset to '%s' while thermostat is in %s mode (unsupported for remote sensors)",
+                preset_mode,
+                self.hvac_mode,
+            )
+            return
 
         self._selected_sensor_name = preset_mode
         # Only rebuild the virtual target if we don't yet have a stored value (e.g. very first run).
@@ -1249,6 +1350,10 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         base_features = (
             ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.PRESET_MODE
         )
+        
+        if supported & ClimateEntityFeature.TARGET_TEMPERATURE_RANGE:
+            base_features |= ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
+            
         if supported & ClimateEntityFeature.FAN_MODE:
             base_features |= ClimateEntityFeature.FAN_MODE
             
