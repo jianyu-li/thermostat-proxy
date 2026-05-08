@@ -9,23 +9,26 @@ The core logic involves calculating the difference (delta) between the selected 
 ## Key Features
 
 *   **Virtual Control:** Wraps an existing `climate` entity and proxies all attributes (fan modes, HVAC modes, etc.).
-*   **Sensor Switching:** Maps configured temperature sensors to `preset_modes`. Switching the preset changes the active control sensor.
+*   **Dual-Setpoint Support:** Supports `AUTO` and `HEAT_COOL` modes (dual setpoints) when using the physical thermostat's internal sensor.
+*   **Sensor Switching:** Maps configured temperature sensors to `preset_modes`. Switching the preset changes the active control sensor. The physical thermostat's internal sensor is always available as a preset (defaulting to "Physical Entity" but renamable).
 *   **Offset Logic:** Automatically adjusts the physical thermostat to achieve the target temperature at the remote sensor's location.
-*   **Overdrive Mode:** Detects if the physical thermostat is "satisfied" (Idle) while the remote sensor is not, and applies an extra offset to force the system to run.
-*   **Safety Limits:** Allows user-configurable `min_temp` and `max_temp` to prevent extreme target setpoints being sent to the physical hardware.
+*   **Overdrive Mode:** Detects if the physical thermostat is "satisfied" (Idle) while the remote sensor is not, and applies a fixed 1.0° offset (up for heat, down for cool) to force the system to run.
+*   **Adjustment Cooldown:** Configurable `cooldown_period` to prevent rapid, repetitive adjustments to the physical thermostat.
+*   **Safety Limits:** Respects both user-configurable `min_temp`/`max_temp` and the physical thermostat's internal hardware limits.
+*   **Auto-Sync Behavior:** Automatically mirrors target temperature changes made directly on the physical thermostat back to the proxy entity.
 *   **Fan Mode Support:** Seamlessly proxies and controls the physical thermostat's fan modes.
 *   **Last Active Sensor:** Option to resume with the most recently selected sensor instead of a fixed default.
-*   **Fallback:** Automatically reverts to the physical thermostat's internal sensor if the remote sensor becomes unavailable.
-*   **Logbook Attribution:** Tracks which user changed the target temperature or preset.
-*   **Configuration:** Fully supports UI-based configuration via Config Flow (add/remove sensors, rename presets, etc.).
+*   **Fallback:** Automatically reverts to the physical thermostat's internal sensor if the remote sensor becomes unavailable or if the system enters an unsupported dual-setpoint mode.
+*   **Logbook Attribution:** Tracks which user changed the target temperature or preset, and provides detailed reasoning for automated adjustments.
+*   **Configuration:** Fully supports UI-based configuration via Config Flow (add/remove sensors, rename presets, etc.) and Options Flow for runtime tweaks.
 
 ## Architecture & Module Organization
 
 The project follows the standard Home Assistant custom component structure:
 
 *   **`custom_components/thermostat_proxy/`**: The core package.
-    *   `climate.py`: Hosts the entity logic and `CustomThermostatEntity` class (state updates, offset calculation, service calls).
-    *   `config_flow.py`: Handles the UI setup (Config Flow) and Options Flow.
+    *   `climate.py`: Hosts the entity logic and `CustomThermostatEntity` class (state updates, offset calculation, dual-setpoint safety, service calls).
+    *   `config_flow.py`: Handles the UI setup (Config Flow), Options Flow, and Reconfiguration logic.
     *   `const.py`: Centralizes constants, attribute names, and defaults.
     *   `manifest.json`: Metadata defining the domain, dependencies (`logbook`), and version.
     *   `translations/`: Localization files (e.g., `en.json`) for UI strings.
@@ -86,10 +89,12 @@ GitHub Actions are configured in `.github/workflows/`:
 2.  **Setup:**
     *   Add via **Settings > Devices & Services > Add Integration**.
     *   Select the physical thermostat to control and add temperature sensors.
+    *   Configure optional parameters: `cooldown_period`, `min_temp`, `max_temp`, and `physical_sensor_name`.
+    *   Use the **Reconfigure** button to modify the core configuration or **Configure** (Options Flow) for runtime adjustments.
 3.  **Operation:**
     *   The proxy `climate` entity will appear.
     *   Change `preset_mode` to switch between sensors.
-    *   Set target temperature on the proxy entity.
+    *   Set target temperature on the proxy entity. For `AUTO` or `HEAT_COOL` modes, use the physical sensor preset.
 
 ## Commit & Pull Request Guidelines
 
