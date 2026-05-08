@@ -70,7 +70,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             unique_id = self._generate_unique_id(name, thermostat)
 
             await self.async_set_unique_id(unique_id)
-            self._abort_if_unique_id_configured()
+            self._abort_if_unique_id_configured(reload_on_update=False)
 
             self._data = {
                 CONF_NAME: name,
@@ -113,7 +113,10 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             CONF_UNIQUE_ID: entry.unique_id,
         }
         self._sensors = [
-            {CONF_SENSOR_NAME: sensor[CONF_SENSOR_NAME], CONF_SENSOR_ENTITY_ID: sensor[CONF_SENSOR_ENTITY_ID]}
+            {
+                CONF_SENSOR_NAME: sensor[CONF_SENSOR_NAME],
+                CONF_SENSOR_ENTITY_ID: sensor[CONF_SENSOR_ENTITY_ID],
+            }
             for sensor in entry.data.get(CONF_SENSORS, [])
         ]
         self._default_sensor = entry.data.get(CONF_DEFAULT_SENSOR)
@@ -140,10 +143,14 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         data_schema = vol.Schema(
             {
-                vol.Required(CONF_NAME, default=self._data[CONF_NAME]): selector.TextSelector(
+                vol.Required(
+                    CONF_NAME, default=self._data[CONF_NAME]
+                ): selector.TextSelector(
                     selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
                 ),
-                vol.Required(CONF_THERMOSTAT, default=self._data[CONF_THERMOSTAT]): selector.EntitySelector(
+                vol.Required(
+                    CONF_THERMOSTAT, default=self._data[CONF_THERMOSTAT]
+                ): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain=["climate"])
                 ),
             }
@@ -177,20 +184,14 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             action_options[ACTION_REMOVE_SENSOR] = ACTION_LABELS[ACTION_REMOVE_SENSOR]
             action_options[ACTION_FINISH] = ACTION_LABELS[ACTION_FINISH]
 
-        default_action = (
-            ACTION_FINISH if self._sensors else ACTION_ADD_SENSOR
+        default_action = ACTION_FINISH if self._sensors else ACTION_ADD_SENSOR
+
+        sensor_list = (
+            ", ".join(sensor[CONF_SENSOR_NAME] for sensor in self._sensors) or "None"
         )
 
-        sensor_list = ", ".join(
-            sensor[CONF_SENSOR_NAME] for sensor in self._sensors
-        ) or "None"
-
         data_schema = vol.Schema(
-            {
-                vol.Required(CONF_ACTION, default=default_action): vol.In(
-                    action_options
-                )
-            }
+            {vol.Required(CONF_ACTION, default=default_action): vol.In(action_options)}
         )
 
         return self.async_show_form(
@@ -212,9 +213,13 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             }
             if sensor_name.lower() in reserved_names:
                 errors["base"] = "reserved_sensor_name"
-            elif any(sensor_name == sensor[CONF_SENSOR_NAME] for sensor in self._sensors):
+            elif any(
+                sensor_name == sensor[CONF_SENSOR_NAME] for sensor in self._sensors
+            ):
                 errors["base"] = "duplicate_sensor_name"
-            elif any(entity_id == sensor[CONF_SENSOR_ENTITY_ID] for sensor in self._sensors):
+            elif any(
+                entity_id == sensor[CONF_SENSOR_ENTITY_ID] for sensor in self._sensors
+            ):
                 errors["base"] = "duplicate_sensor_entity"
             else:
                 self._sensors.append(
@@ -307,7 +312,9 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 submitted_physical_name.strip() if submitted_physical_name else ""
             ) or PHYSICAL_SENSOR_NAME
 
-            cooldown_period = user_input.get(CONF_COOLDOWN_PERIOD, DEFAULT_COOLDOWN_PERIOD)
+            cooldown_period = user_input.get(
+                CONF_COOLDOWN_PERIOD, DEFAULT_COOLDOWN_PERIOD
+            )
             min_temp = user_input.get(CONF_MIN_TEMP) or None
             max_temp = user_input.get(CONF_MAX_TEMP) or None
 
@@ -316,7 +323,10 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 for sensor_name in sensor_names
             ):
                 errors["base"] = "physical_name_conflict"
-            elif default_sensor and default_sensor not in (*available_default_options, DEFAULT_SENSOR_LAST_ACTIVE):
+            elif default_sensor and default_sensor not in (
+                *available_default_options,
+                DEFAULT_SENSOR_LAST_ACTIVE,
+            ):
                 errors["base"] = "invalid_default_sensor"
             elif min_temp is not None and max_temp is not None and min_temp >= max_temp:
                 errors["base"] = "invalid_temp_range"
@@ -358,21 +368,17 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 if self._reconfigure_entry:
                     options = dict(self._reconfigure_entry.options)
                     current_option_default = options.get(CONF_DEFAULT_SENSOR)
-                    if (
-                        current_option_default
-                        and current_option_default
-                        not in (*sensor_names_with_physical, DEFAULT_SENSOR_LAST_ACTIVE)
+                    if current_option_default and current_option_default not in (
+                        *sensor_names_with_physical,
+                        DEFAULT_SENSOR_LAST_ACTIVE,
                     ):
                         options.pop(CONF_DEFAULT_SENSOR)
-                    self.hass.config_entries.async_update_entry(
+                    return self.async_update_and_abort(
                         self._reconfigure_entry,
                         data=data,
                         options=options,
+                        reason="reconfigure_successful",
                     )
-                    await self.hass.config_entries.async_reload(
-                        self._reconfigure_entry.entry_id
-                    )
-                    return self.async_abort(reason="reconfigure_successful")
                 return self.async_create_entry(title=self._data[CONF_NAME], data=data)
 
         schema_fields: dict[Any, Any] = {
@@ -385,21 +391,30 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_COOLDOWN_PERIOD, default=self._cooldown_period
             ): selector.NumberSelector(
                 selector.NumberSelectorConfig(
-                    min=0, max=300, unit_of_measurement="seconds", mode=selector.NumberSelectorMode.BOX
+                    min=0,
+                    max=300,
+                    unit_of_measurement="seconds",
+                    mode=selector.NumberSelectorMode.BOX,
                 )
             ),
         }
 
         number_selector = selector.NumberSelector(
-            selector.NumberSelectorConfig(max=100, step=0.5, mode=selector.NumberSelectorMode.BOX)
+            selector.NumberSelectorConfig(
+                max=100, step=0.5, mode=selector.NumberSelectorMode.BOX
+            )
         )
-        
+
         # Show current values as defaults during reconfigure (0 = disabled)
         min_temp_default = self._min_temp if self._min_temp is not None else 0
         max_temp_default = self._max_temp if self._max_temp is not None else 0
-        
-        schema_fields[vol.Optional(CONF_MIN_TEMP, default=min_temp_default)] = number_selector
-        schema_fields[vol.Optional(CONF_MAX_TEMP, default=max_temp_default)] = number_selector
+
+        schema_fields[vol.Optional(CONF_MIN_TEMP, default=min_temp_default)] = (
+            number_selector
+        )
+        schema_fields[vol.Optional(CONF_MAX_TEMP, default=max_temp_default)] = (
+            number_selector
+        )
 
         if sensor_names:
             default_options = [
@@ -419,9 +434,9 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Optional(CONF_DEFAULT_SENSOR, default=default_sensor)
                 ] = selector.SelectSelector(selector_config)
             else:
-                schema_fields[
-                    vol.Optional(CONF_DEFAULT_SENSOR)
-                ] = selector.SelectSelector(selector_config)
+                schema_fields[vol.Optional(CONF_DEFAULT_SENSOR)] = (
+                    selector.SelectSelector(selector_config)
+                )
 
         data_schema = vol.Schema(schema_fields)
 
@@ -499,8 +514,11 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
             default_sensor = user_input.get(CONF_DEFAULT_SENSOR)
             min_temp = user_input.get(CONF_MIN_TEMP) or None
             max_temp = user_input.get(CONF_MAX_TEMP) or None
-            
-            if default_sensor and default_sensor not in (*sensor_names, DEFAULT_SENSOR_LAST_ACTIVE):
+
+            if default_sensor and default_sensor not in (
+                *sensor_names,
+                DEFAULT_SENSOR_LAST_ACTIVE,
+            ):
                 errors["base"] = "invalid_default_sensor"
             elif min_temp is not None and max_temp is not None and min_temp >= max_temp:
                 errors["base"] = "invalid_temp_range"
@@ -513,11 +531,13 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
                     if default_sensor:
                         data[CONF_DEFAULT_SENSOR] = default_sensor
                     data[CONF_USE_LAST_ACTIVE_SENSOR] = False
-                
-                data[CONF_COOLDOWN_PERIOD] = user_input.get(CONF_COOLDOWN_PERIOD, DEFAULT_COOLDOWN_PERIOD)
+
+                data[CONF_COOLDOWN_PERIOD] = user_input.get(
+                    CONF_COOLDOWN_PERIOD, DEFAULT_COOLDOWN_PERIOD
+                )
                 data[CONF_MIN_TEMP] = min_temp
                 data[CONF_MAX_TEMP] = max_temp
-                
+
                 return self.async_create_entry(title="", data=data)
 
         schema_fields: dict[Any, Any] = {}
@@ -539,29 +559,40 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
                 if use_last_active_sensor
                 else current_default
             )
-            schema_fields[vol.Optional(
-                CONF_DEFAULT_SENSOR,
-                default=default_choice or sensor_names[0],
-            )] = selector.SelectSelector(selector_config)
+            schema_fields[
+                vol.Optional(
+                    CONF_DEFAULT_SENSOR,
+                    default=default_choice or sensor_names[0],
+                )
+            ] = selector.SelectSelector(selector_config)
 
-        schema_fields[
-            vol.Optional(CONF_COOLDOWN_PERIOD, default=current_cooldown)
-        ] = selector.NumberSelector(
-            selector.NumberSelectorConfig(
-                min=0, max=300, unit_of_measurement="seconds", mode=selector.NumberSelectorMode.BOX
+        schema_fields[vol.Optional(CONF_COOLDOWN_PERIOD, default=current_cooldown)] = (
+            selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=0,
+                    max=300,
+                    unit_of_measurement="seconds",
+                    mode=selector.NumberSelectorMode.BOX,
+                )
             )
         )
 
         number_selector = selector.NumberSelector(
-            selector.NumberSelectorConfig(max=100, step=0.5, mode=selector.NumberSelectorMode.BOX)
+            selector.NumberSelectorConfig(
+                max=100, step=0.5, mode=selector.NumberSelectorMode.BOX
+            )
         )
-        
+
         # Show current values as defaults in options (0 = disabled)
         min_temp_default = current_min_temp if current_min_temp is not None else 0
         max_temp_default = current_max_temp if current_max_temp is not None else 0
-        
-        schema_fields[vol.Optional(CONF_MIN_TEMP, default=min_temp_default)] = number_selector
-        schema_fields[vol.Optional(CONF_MAX_TEMP, default=max_temp_default)] = number_selector
+
+        schema_fields[vol.Optional(CONF_MIN_TEMP, default=min_temp_default)] = (
+            number_selector
+        )
+        schema_fields[vol.Optional(CONF_MAX_TEMP, default=max_temp_default)] = (
+            number_selector
+        )
 
         data_schema = vol.Schema(schema_fields)
 
