@@ -753,8 +753,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
     @property
     def target_temperature(self) -> float | None:
-        if self.hvac_mode in (HVACMode.HEAT_COOL, HVACMode.AUTO):
-            if self.supported_features & ClimateEntityFeature.TARGET_TEMPERATURE_RANGE:
+        if self.supported_features & ClimateEntityFeature.TARGET_TEMPERATURE_RANGE:
+            if self.hvac_mode in UNSUPPORTED_REMOTE_MODES:
                 return None
         return self._virtual_target_temperature
 
@@ -857,10 +857,9 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             if high is not None or low is not None:
                 # Security/Safety: Dual setpoints only allowed on physical sensor
                 if self._selected_sensor_name != self._physical_sensor_name:
-                    _LOGGER.warning(
-                        "Dual setpoint adjustment only allowed when using physical sensor"
+                    raise ValueError(
+                        f"Dual setpoint adjustment is only supported when using the {self._physical_sensor_name} preset"
                     )
-                    return
 
                 payload = {ATTR_ENTITY_ID: self._real_entity_id}
                 if high is not None:
@@ -1023,12 +1022,9 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             self.hvac_mode in UNSUPPORTED_REMOTE_MODES
             and preset_mode != self._physical_sensor_name
         ):
-            _LOGGER.warning(
-                "Cannot switch preset to '%s' while thermostat is in %s mode (unsupported for remote sensors)",
-                preset_mode,
-                self.hvac_mode,
+            raise ValueError(
+                f"Cannot switch to '{preset_mode}' while in {self.hvac_mode} mode (remote sensors not supported in this mode)"
             )
-            return
 
         self._selected_sensor_name = preset_mode
         # Only rebuild the virtual target if we don't yet have a stored value (e.g. very first run).
