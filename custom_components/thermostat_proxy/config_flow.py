@@ -378,12 +378,10 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         if key in options:
                             options[key] = data.get(key)
 
-                    current_option_default = options.get(CONF_DEFAULT_SENSOR)
-                    if current_option_default and current_option_default not in (
-                        *sensor_names_with_physical,
-                        DEFAULT_SENSOR_LAST_ACTIVE,
-                    ):
-                        options.pop(CONF_DEFAULT_SENSOR)
+                    if data.get(CONF_NAME) != self._reconfigure_entry.title:
+                        self.hass.config_entries.async_update_entry(
+                            self._reconfigure_entry, title=data[CONF_NAME]
+                        )
                     return self.async_update_and_abort(
                         self._reconfigure_entry,
                         data=data,
