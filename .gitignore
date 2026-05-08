@@ -4,3 +4,4 @@ TODO.local.md
 GIT_COMMANDS.md
 __pycache__/
 *.pyc
+.vscode/settings.json

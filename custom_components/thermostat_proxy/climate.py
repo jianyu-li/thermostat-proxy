@@ -48,7 +48,7 @@ from homeassistant.components.climate.const import (
     ATTR_CURRENT_HUMIDITY,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, State, callback
+from homeassistant.core import CoreState, HomeAssistant, State, callback
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_call_later, async_track_state_change_event
@@ -1443,6 +1443,15 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             return
         self._entity_health[entity_id] = is_available
         if not is_available:
+            # Downgrade log level during startup to avoid noise
+            if self.hass.state != CoreState.running:
+                _LOGGER.debug(
+                    "Entity %s is not available yet during startup for %s",
+                    entity_id,
+                    self.entity_id,
+                )
+                return
+
             _LOGGER.warning(
                 "Entity %s became unavailable for %s; using fallbacks where possible",
                 entity_id,
