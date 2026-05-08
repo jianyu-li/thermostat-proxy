@@ -22,7 +22,9 @@ A Home Assistant custom integration that lets you expose a virtual `climate` ent
 - Remembers the previously selected sensor/target temperature across restarts and surfaces an `unavailable_entities` attribute so you can monitor unhealthy dependencies.
 - Always adds a built-in preset for the wrapped thermostat’s own temperature reading (named `Physical Entity` by default, but you can rename it during setup) so you can revert or set it as the default sensor.
 - If someone changes the physical thermostat directly, the proxy automatically switches to the physical preset and logs the change in Home Assistant's logbook.
-- "Overdrive" logic: If the remote sensor hasn't reached the target but the physical thermostat thinks it's done (e.g. goes "Idle"), the proxy will temporarily offset the real target by an additional degree to force the HVAC to keep running until the remote sensor is satisfied.
+- **Overdrive** logic: If the remote sensor hasn't reached the target but the physical thermostat thinks it's done (e.g. goes "Idle"), the proxy will temporarily offset the real target by an additional degree to force the HVAC to keep running until the remote sensor is satisfied.
+- **Auto & Heat-Cool Mode Support**: Supports dual-setpoint thermostat modes when using the **Physical Entity** preset.
+  - **Restriction**: Remote sensor tracking and offsets are **not supported** for dual-setpoint modes (Auto or Heat/Cool). If the thermostat is moved into one of these modes, the proxy automatically reverts to the physical sensor and blocks selection of remote sensors to ensure system safety.
 - **Fan Mode Support**: Fully proxies the real thermostat's fan modes. You can control the fan (Auto/On/Low/etc.) seamlessly through the proxy entity.
 - **User Log Attribution**: Logbook entries for target temperature or preset changes will show which user performed the action.
 - **Safety Limits**: Configure custom `min_temp` and `max_temp` bounds. Calculated targets are clamped to these limits to prevent extreme requests due to sensor anomalies or to respect operational restrictions enforced by certain thermostats that aren't exposed through their Home Assistant attributes.
@@ -47,6 +49,7 @@ A Home Assistant custom integration that lets you expose a virtual `climate` ent
 - When you call `climate.set_temperature` on the custom entity, it calculates `delta = requested_temp - displayed_current_temp` and then sets the real thermostat to `real_current_temp + delta`. A two-degree increase relative to the virtual sensor becomes a two-degree increase on the physical thermostat, for example.
 - **Overdrive**: If the virtual target is not met (e.g., set to 70, sensor reads 69), but the physical thermostat (satisfied at its own location) goes Idle, the integration detects this "Stall". It then applies a +1° (or -1° for cooling) "Overdrive" offset to the physical thermostat's target to force it to run. This offset sticks until the virtual target is met or the system is no longer stalled.
 - **Safety Clamping**: Calculated targets are first clamped to user-configured `min_temp` and `max_temp` safety limits (if set), then further constrained to the physical thermostat's `min_temp`, `max_temp`, and `target_temp_step`. This dual-layer protection prevents extreme values from sensor anomalies. Configuring explicit safety limits is useful for certain thermostats that enforce additional operational restrictions not exposed through their Home Assistant attributes.
+- **Auto/Heat-Cool**: When the physical thermostat is in a dual-setpoint mode, the proxy automatically reverts to the `Physical Entity` preset, exposes dual setpoint sliders (High/Low) to the Home Assistant UI, and logs the action. Direct passthrough of values is used in these modes to maintain strict alignment with the physical hardware.
 - If the physical thermostat’s target changes outside of this integration, the proxy moves to the physical preset and aligns its virtual target with the real target.
 - All attributes from the physical thermostat are forwarded as extra attributes, alongside:
   - `active_sensor`
@@ -130,7 +133,7 @@ mode: single
 
 ## Limitations / Notes
 
-- The component assumes a single target temperature (heat, cool, or auto with a shared set point). Dual set points (`target_temp_low` / `target_temp_high`) are not supported.
+- The component supports single target temperatures (heat or cool) for remote sensor operations. Dual set points (`target_temp_low` / `target_temp_high`) are supported via direct passthrough to the physical thermostat, but only when the `Physical Entity` preset is active. Remote sensor offsets are disabled in dual-setpoint modes.
 - Because Home Assistant does not expose the real thermostat’s precision/step directly, changes to `current_temperature` or the linked thermostat may momentarily desync the displayed target temperature if another integration changes the physical thermostat. The entity exposes the real target temperature as an attribute so you can reconcile differences.
 - Manual changes made directly on the physical thermostat will switch the proxy to the physical preset and align the virtual target with the real set point while recording a logbook entry.
 - If you pick a specific default sensor instead of "Last active sensor", the proxy will fall back to that default after a restart even if you had switched to a different preset earlier.
