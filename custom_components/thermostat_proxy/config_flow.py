@@ -367,6 +367,17 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     data[CONF_DEFAULT_SENSOR] = default_sensor
                 if self._reconfigure_entry:
                     options = dict(self._reconfigure_entry.options)
+                    # Sync shared parameters to ensure reconfigured values are not overridden by stale options
+                    for key in (
+                        CONF_DEFAULT_SENSOR,
+                        CONF_COOLDOWN_PERIOD,
+                        CONF_MIN_TEMP,
+                        CONF_MAX_TEMP,
+                        CONF_USE_LAST_ACTIVE_SENSOR,
+                    ):
+                        if key in options:
+                            options[key] = data.get(key)
+
                     current_option_default = options.get(CONF_DEFAULT_SENSOR)
                     if current_option_default and current_option_default not in (
                         *sensor_names_with_physical,
