@@ -21,6 +21,7 @@ A Home Assistant custom integration that lets you expose a virtual `climate` ent
 - Exposes helper attributes: active sensor, sensor entity id, real current temperature, and the last real target temperature.
 - Remembers the previously selected sensor/target temperature across restarts and surfaces an `unavailable_entities` attribute so you can monitor unhealthy dependencies.
 - Always adds a built-in preset for the wrapped thermostat’s own temperature reading (named `Physical Entity` by default, but you can rename it during setup) so you can revert or set it as the default sensor.
+- If someone changes the physical thermostat directly, the proxy automatically switches to the physical preset and logs the change in Home Assistant's logbook.
 - **Overdrive** logic: If the remote sensor hasn't reached the target but the physical thermostat thinks it's done (e.g. goes "Idle"), the proxy will temporarily offset the real target by an additional degree to force the HVAC to keep running until the remote sensor is satisfied.
 - **Auto & Heat-Cool Mode Support**: Supports dual-setpoint thermostat modes when using the **Physical Entity** preset.
   - **Restriction**: Remote sensor tracking and offsets are **not supported** for dual-setpoint modes (Auto or Heat/Cool). If the thermostat is moved into one of these modes, the proxy automatically reverts to the physical sensor and blocks selection of remote sensors to ensure system safety.
