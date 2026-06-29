@@ -675,11 +675,11 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         state = self._sensor_states.get(sensor.entity_id)
         if not state or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
             self._mark_entity_health(sensor.entity_id, False)
-            return None
+            return self._get_real_current_temperature()
         value = _coerce_temperature(state.state)
         if value is None:
             self._mark_entity_health(sensor.entity_id, False)
-            return None
+            return self._get_real_current_temperature()
         self._mark_entity_health(sensor.entity_id, True)
         return value
 
@@ -804,6 +804,18 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
     @property
     def preset_mode(self) -> str | None:
+        sensor = self._sensor_lookup.get(self._selected_sensor_name)
+        if not sensor or sensor.is_physical:
+            return self._selected_sensor_name
+
+        state = self._sensor_states.get(sensor.entity_id)
+        if (
+            not state
+            or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN)
+            or _coerce_temperature(state.state) is None
+        ):
+            return self._physical_sensor_name
+
         return self._selected_sensor_name
 
     @property
@@ -1025,6 +1037,19 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             raise ValueError(
                 f"Cannot switch to '{preset_mode}' while in {self.hvac_mode} mode (remote sensors not supported in this mode)"
             )
+
+        if preset_mode != self._physical_sensor_name:
+            sensor = self._sensor_lookup.get(preset_mode)
+            if sensor and not sensor.is_physical:
+                state = self._sensor_states.get(sensor.entity_id)
+                if (
+                    not state
+                    or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN)
+                    or _coerce_temperature(state.state) is None
+                ):
+                    raise ValueError(
+                        f"Cannot switch to '{preset_mode}' because the sensor is currently unavailable"
+                    )
 
         self._selected_sensor_name = preset_mode
         # Only rebuild the virtual target if we don't yet have a stored value (e.g. very first run).
@@ -1457,12 +1482,49 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 entity_id,
                 self.entity_id,
             )
+
+            # Logbook event if this is the active remote sensor
+            sensor = self._sensor_lookup.get(self._selected_sensor_name)
+            if sensor and sensor.entity_id == entity_id and not sensor.is_physical:
+
+                async def _log_fallback() -> None:
+                    await self.hass.services.async_call(
+                        LOGBOOK_DOMAIN,
+                        LOGBOOK_SERVICE_LOG,
+                        {
+                            "name": self.name,
+                            "entity_id": self.entity_id,
+                            "message": f"Automatically reverted to '{self._physical_sensor_name}' because '{sensor.name}' became unavailable",
+                        },
+                        blocking=False,
+                    )
+
+                self.hass.async_create_task(_log_fallback())
+
         elif previous is not None:
             _LOGGER.info(
                 "Entity %s recovered for %s",
                 entity_id,
                 self.entity_id,
             )
+
+            # Logbook event if this is the active remote sensor
+            sensor = self._sensor_lookup.get(self._selected_sensor_name)
+            if sensor and sensor.entity_id == entity_id and not sensor.is_physical:
+
+                async def _log_recovery() -> None:
+                    await self.hass.services.async_call(
+                        LOGBOOK_DOMAIN,
+                        LOGBOOK_SERVICE_LOG,
+                        {
+                            "name": self.name,
+                            "entity_id": self.entity_id,
+                            "message": f"Automatically restored '{sensor.name}' as the active sensor",
+                        },
+                        blocking=False,
+                    )
+
+                self.hass.async_create_task(_log_recovery())
 
     def _apply_target_constraints(self, value: float | None) -> float | None:
         if value is None:
