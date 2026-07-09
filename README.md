@@ -139,6 +139,7 @@ mode: single
 - **Disable built-in Comfort/Eco/Schedule modes**: Disable any comfort modes, eco modes, or schedules configured directly on the physical thermostat (or via its proprietary app/integration). Because these modes change the target temperature setpoints outside of this integration, they will cause the proxy to detect a manual change and automatically fall back to the `Physical Entity` preset.
 - If you pick a specific default sensor instead of "Last active sensor", the proxy will fall back to that default after a restart even if you had switched to a different preset earlier.
 - This integration does not use humidity data for its core logic (e.g., temperature control), but it does expose the underlying thermostat's humidity reading as a real_current_humidity attribute for visibility.
+- **Dynamic Precision**: The proxy automatically determines the target step size and display precision by taking the *coarsest* resolution between your physical thermostat and the currently active remote sensor. For example, if your physical thermostat steps by 0.5° but your active remote sensor only reports in whole degrees (1.0° precision), the proxy will only allow you to set targets in 1.0° increments while that sensor is active. Switching to a higher-precision sensor will dynamically restore the finer stepping.
 
 ## Contributing
 
