@@ -6,3 +6,5 @@ __pycache__/
 *.pyc
 .vscode/settings.json
 .agent/
+.pytest_cache/
+.venv*

@@ -53,6 +53,12 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
 
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: config_entries.ConfigEntry):
+        """Get the options flow for this handler."""
+        return CustomThermostatOptionsFlowHandler(config_entry)
+
     def __init__(self) -> None:
         self._data: dict[str, Any] = {}
         self._sensors: list[dict[str, str]] = []
@@ -496,7 +502,8 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
     """Handle Thermostat Proxy options."""
 
     def __init__(self, entry: config_entries.ConfigEntry) -> None:
-        self.config_entry = entry
+        """Initialize options flow."""
+        pass
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None):
         sensors = self.config_entry.data.get(CONF_SENSORS, [])
@@ -640,10 +647,3 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
             data_schema=data_schema,
             errors=errors,
         )
-
-
-@callback
-def async_get_options_flow(config_entry: config_entries.ConfigEntry):
-    """Return the options flow handler."""
-
-    return CustomThermostatOptionsFlowHandler(config_entry)

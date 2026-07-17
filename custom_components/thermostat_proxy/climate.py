@@ -15,6 +15,7 @@ import voluptuous as vol
 
 from homeassistant.components.climate import PLATFORM_SCHEMA, ClimateEntity
 from homeassistant.components.climate.const import (
+    ATTR_CURRENT_HUMIDITY,
     ATTR_CURRENT_TEMPERATURE,
     ATTR_HVAC_ACTION,
     ATTR_HVAC_MODE,
@@ -43,9 +44,6 @@ from homeassistant.const import (
     STATE_UNAVAILABLE,
     STATE_UNKNOWN,
     UnitOfTemperature,
-)
-from homeassistant.components.climate.const import (
-    ATTR_CURRENT_HUMIDITY,
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import CoreState, HomeAssistant, State, callback
@@ -345,6 +343,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self._sensor_realign_task: asyncio.Task | None = None
         self._suppress_sync_logs_until: float | None = None
         self._cooldown_timer_unsub: Callable[[], None] | None = None
+        self._sensor_precisions: dict[str, float] = {}
 
     async def async_added_to_hass(self) -> None:
         """Finish setup when entity is added."""
@@ -361,6 +360,9 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             )
             self._update_sensor_health_from_state(
                 sensor.entity_id, self._sensor_states[sensor.entity_id]
+            )
+            self._sensor_precisions[sensor.entity_id] = self._infer_sensor_precision(
+                self._sensor_states[sensor.entity_id]
             )
         self._temperature_unit = self._discover_temperature_unit()
         if self._virtual_target_temperature is None:
@@ -505,7 +507,12 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                         POST_WRITE_GRACE_PERIOD,
                     )
                 elif not math.isclose(
-                    real_target, previous_real_target, abs_tol=EXTERNAL_CHANGE_TOLERANCE
+                    real_target,
+                    previous_real_target,
+                    abs_tol=max(
+                        EXTERNAL_CHANGE_TOLERANCE,
+                        self._target_temp_step or 0,
+                    ),
                 ):
                     _LOGGER.info(
                         "Detected potential external change: %s -> %s (tolerance %s)",
@@ -528,6 +535,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         new_state: State | None = event.data.get("new_state")
         if entity_id:
             self._sensor_states[entity_id] = new_state
+            self._sensor_precisions[entity_id] = self._infer_sensor_precision(new_state)
         self._update_sensor_health_from_state(entity_id, new_state)
         if self._is_active_sensor_entity(entity_id):
             self._schedule_target_realign()
@@ -578,9 +586,11 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         """Return the tolerance used when matching pending requests."""
 
         precision = self.precision or DEFAULT_PRECISION
+        step = self._target_temp_step or 0
         return max(
             PENDING_REQUEST_TOLERANCE_MIN,
             min(PENDING_REQUEST_TOLERANCE_MAX, precision / 2),
+            step,
         )
 
     def _remove_real_target_request(self, real_target: float) -> None:
@@ -739,19 +749,43 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
     @property
     def target_temperature_step(self) -> float | None:
-        if self._target_temp_step is not None:
-            return self._target_temp_step
-        if self._precision_override is not None:
-            return self._precision_override
-        return super().target_temperature_step
+        base = (
+            self._target_temp_step
+            or self._precision_override
+            or super().target_temperature_step
+        )
+        if base is not None:
+            return max(base, self._get_active_sensor_precision())
+        return base
 
     @property
     def precision(self) -> float:
-        if self._precision_override is not None:
-            return self._precision_override
-        if self._target_temp_step is not None:
-            return self._target_temp_step
-        return super().precision
+        base = self._precision_override or (
+            self._target_temp_step if self._target_temp_step else None
+        )
+        if base is not None:
+            return max(base, self._get_active_sensor_precision())
+        return max(super().precision, self._get_active_sensor_precision())
+
+    def _get_active_sensor_precision(self) -> float:
+        """Return the active sensor's inferred precision, or DEFAULT_PRECISION."""
+        sensor = self._sensor_lookup.get(self._selected_sensor_name)
+        if not sensor or sensor.is_physical:
+            return 0  # Physical sensor doesn't constrain — thermostat precision governs
+        return self._sensor_precisions.get(sensor.entity_id, DEFAULT_PRECISION)
+
+    def _infer_sensor_precision(self, state: State | None) -> float:
+        """Infer precision from a sensor state's decimal places."""
+        if not state or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+            return DEFAULT_PRECISION
+        try:
+            state_str = str(state.state)
+            if "." in state_str:
+                decimals = len(state_str.split(".")[1])
+                return round(10 ** (-decimals), decimals)
+            return 1.0
+        except (ValueError, IndexError):
+            return DEFAULT_PRECISION
 
     @property
     def current_temperature(self) -> float | None:
@@ -1752,30 +1786,33 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         rounded = self._round_log_temperature_value(value)
         if rounded is None:
             return None
-        return str(rounded)
+        return f"{rounded:.1f}"
 
-    def _round_log_temperature_value(self, value: float | None) -> int | None:
+    def _round_log_temperature_value(self, value: float | None) -> float | None:
         if value is None:
             return None
-        return int(round(value))
+        step = self.precision or DEFAULT_PRECISION
+        if step >= 1:
+            return float(round(value))
+        return round(value, 1)
 
     def _format_math_sensor_virtual(
         self,
-        sensor_val: int | None,
-        virtual_val: int | None,
+        sensor_val: float | None,
+        virtual_val: float | None,
         unit: str,
     ) -> str | None:
         if sensor_val is None or virtual_val is None:
             return None
         diff = sensor_val - virtual_val
-        return f"{sensor_val}{unit} - {virtual_val}{unit} = {diff}{unit}"
+        return f"{sensor_val:.1f}{unit} - {virtual_val:.1f}{unit} = {diff:.1f}{unit}"
 
     def _format_math_real_adjustment(
         self,
-        real_val: int | None,
-        sensor_val: int | None,
-        virtual_val: int | None,
-        desired_val: int | None,
+        real_val: float | None,
+        sensor_val: float | None,
+        virtual_val: float | None,
+        desired_val: float | None,
         unit: str,
         overdrive_adjust: float | None = None,
     ) -> str | None:
@@ -1790,28 +1827,28 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             delta = abs(diff)
         result = desired_val if desired_val is not None else real_val - diff
         if overdrive_adjust:
-            round_adjust = int(round(overdrive_adjust))
+            round_adjust = round(overdrive_adjust, 1)
             op_adj = "+" if round_adjust >= 0 else "-"
-            return f"{real_val}{unit} {op} {delta}{unit} ({op_adj}{abs(round_adjust)} overdrive) = {result}{unit}"
-        return f"{real_val}{unit} {op} {delta}{unit} = {result}{unit}"
+            return f"{real_val:.1f}{unit} {op} {delta:.1f}{unit} ({op_adj}{abs(round_adjust):.1f} overdrive) = {result:.1f}{unit}"
+        return f"{real_val:.1f}{unit} {op} {delta:.1f}{unit} = {result:.1f}{unit}"
 
     def _format_math_real_to_virtual(
         self,
-        real_target_val: int | None,
-        real_current_val: int | None,
+        real_target_val: float | None,
+        real_current_val: float | None,
         unit: str,
     ) -> str | None:
         if real_target_val is None or real_current_val is None:
             return None
         diff = real_target_val - real_current_val
-        return f"{real_target_val}{unit} - {real_current_val}{unit} = {diff}{unit}"
+        return f"{real_target_val:.1f}{unit} - {real_current_val:.1f}{unit} = {diff:.1f}{unit}"
 
     def _format_math_sensor_plus_delta(
         self,
-        sensor_val: int | None,
-        real_target_val: int | None,
-        real_current_val: int | None,
-        virtual_val: int | None,
+        sensor_val: float | None,
+        real_target_val: float | None,
+        real_current_val: float | None,
+        virtual_val: float | None,
         unit: str,
     ) -> str | None:
         if sensor_val is None or real_target_val is None or real_current_val is None:
@@ -1824,7 +1861,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             op = "-"
             delta = abs(diff)
         result = virtual_val if virtual_val is not None else sensor_val + diff
-        return f"{sensor_val}{unit} {op} {delta}{unit} = {result}{unit}"
+        return f"{sensor_val:.1f}{unit} {op} {delta:.1f}{unit} = {result:.1f}{unit}"
 
     async def _get_actor_name(self) -> str | None:
         """Attempt to identify the user who triggered the current action."""
