@@ -17,6 +17,7 @@ def mock_hass():
     hass.config = MagicMock()
     hass.config.units.temperature_unit = "°C"
     hass.services = AsyncMock()
+    hass.async_create_task.side_effect = lambda coro: coro.close()
     return hass
 
 def create_proxy(hass, thermostat="climate.real"):
