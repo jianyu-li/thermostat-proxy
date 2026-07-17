@@ -81,6 +81,8 @@ from .const import (
     DEFAULT_COOLDOWN_PERIOD,
     CONF_MIN_TEMP,
     CONF_MAX_TEMP,
+    CONF_MAX_SYNC_OFFSET,
+    DEFAULT_MAX_SYNC_OFFSET,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -222,6 +224,10 @@ async def async_setup_entry(
         CONF_MAX_TEMP,
         data.get(CONF_MAX_TEMP),
     )
+    max_sync_offset = entry.options.get(
+        CONF_MAX_SYNC_OFFSET,
+        data.get(CONF_MAX_SYNC_OFFSET, DEFAULT_MAX_SYNC_OFFSET),
+    )
 
     if raw_default_sensor == DEFAULT_SENSOR_LAST_ACTIVE:
         use_last_active_sensor = True
@@ -251,6 +257,7 @@ async def async_setup_entry(
                 cooldown_period=cooldown_period,
                 user_min_temp=user_min_temp,
                 user_max_temp=user_max_temp,
+                max_sync_offset=max_sync_offset,
             )
         ]
     )
@@ -283,6 +290,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         cooldown_period: float | int | datetime.timedelta = 0,
         user_min_temp: float | None = None,
         user_max_temp: float | None = None,
+        max_sync_offset: float | None = None,
     ) -> None:
         self.hass = hass
         if isinstance(cooldown_period, (int, float)):
@@ -329,6 +337,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self._max_temp: float | None = None
         self._user_min_temp: float | None = user_min_temp
         self._user_max_temp: float | None = user_max_temp
+        self._max_sync_offset: float | None = max_sync_offset
         self._target_temp_step: float | None = None
         self._precision_override: float | None = None
         self._entity_health: dict[str, bool] = {}
@@ -941,6 +950,11 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 return
 
             delta = constrained_target - display_current
+            if self._max_sync_offset and abs(delta) > self._max_sync_offset:
+                raise ValueError(
+                    f"Requested target {constrained_target} requires an offset of {abs(delta)}°, "
+                    f"which exceeds the configured max_sync_offset ({self._max_sync_offset}°)."
+                )
             calculated_real_target = real_current + delta
             real_target = self._apply_safety_clamp(calculated_real_target)
             if real_target is None:
@@ -1238,6 +1252,21 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 return
 
             delta = self._virtual_target_temperature - sensor_temp
+
+            if self._max_sync_offset:
+                clamped_delta = max(
+                    -self._max_sync_offset, min(delta, self._max_sync_offset)
+                )
+                if clamped_delta != delta:
+                    _LOGGER.warning(
+                        "Thermostat Proxy (%s): Target offset %.1f exceeded max sync offset (±%.1f). Clamping offset to %.1f.",
+                        self.entity_id,
+                        delta,
+                        self._max_sync_offset,
+                        clamped_delta,
+                    )
+                    delta = clamped_delta
+
             calculated_real_target = real_current + delta
 
             # Overdrive Logic: Check if we are stalled

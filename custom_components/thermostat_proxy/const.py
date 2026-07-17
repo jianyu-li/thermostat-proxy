@@ -20,8 +20,10 @@ CONF_PHYSICAL_SENSOR_NAME = "physical_sensor_name"
 CONF_COOLDOWN_PERIOD = "cooldown_period"
 CONF_MIN_TEMP = "min_temp"
 CONF_MAX_TEMP = "max_temp"
+CONF_MAX_SYNC_OFFSET = "max_sync_offset"
 
 DEFAULT_COOLDOWN_PERIOD = 0
+DEFAULT_MAX_SYNC_OFFSET = 10.0
 
 ATTR_ACTIVE_SENSOR = "active_sensor"
 ATTR_ACTIVE_SENSOR_ENTITY_ID = "active_sensor_entity_id"

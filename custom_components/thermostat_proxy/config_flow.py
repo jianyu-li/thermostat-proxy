@@ -29,6 +29,8 @@ from .const import (
     DEFAULT_COOLDOWN_PERIOD,
     CONF_MIN_TEMP,
     CONF_MAX_TEMP,
+    CONF_MAX_SYNC_OFFSET,
+    DEFAULT_MAX_SYNC_OFFSET,
 )
 
 SENSOR_STEP = "sensors"
@@ -60,6 +62,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._cooldown_period: int = DEFAULT_COOLDOWN_PERIOD
         self._min_temp: float | None = None
         self._max_temp: float | None = None
+        self._max_sync_offset: float | None = None
         self._reconfigure_entry: config_entries.ConfigEntry | None = None
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None):
@@ -128,6 +131,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
         self._min_temp = entry.data.get(CONF_MIN_TEMP)
         self._max_temp = entry.data.get(CONF_MAX_TEMP)
+        self._max_sync_offset = entry.data.get(CONF_MAX_SYNC_OFFSET)
         self._use_last_active_sensor = entry.data.get(
             CONF_USE_LAST_ACTIVE_SENSOR, False
         )
@@ -317,6 +321,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             )
             min_temp = user_input.get(CONF_MIN_TEMP) or None
             max_temp = user_input.get(CONF_MAX_TEMP) or None
+            max_sync_offset = user_input.get(CONF_MAX_SYNC_OFFSET) or None
 
             if any(
                 physical_sensor_name.lower() == sensor_name.lower()
@@ -346,6 +351,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._cooldown_period = cooldown_period
                 self._min_temp = min_temp
                 self._max_temp = max_temp
+                self._max_sync_offset = max_sync_offset
                 self._use_last_active_sensor = use_last_active_sensor
 
                 sensor_names_with_physical = list(sensor_names)
@@ -360,6 +366,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_USE_LAST_ACTIVE_SENSOR: self._use_last_active_sensor,
                     CONF_MIN_TEMP: min_temp,
                     CONF_MAX_TEMP: max_temp,
+                    CONF_MAX_SYNC_OFFSET: max_sync_offset,
                 }
                 if self._use_last_active_sensor:
                     data[CONF_DEFAULT_SENSOR] = DEFAULT_SENSOR_LAST_ACTIVE
@@ -373,6 +380,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_COOLDOWN_PERIOD,
                         CONF_MIN_TEMP,
                         CONF_MAX_TEMP,
+                        CONF_MAX_SYNC_OFFSET,
                         CONF_USE_LAST_ACTIVE_SENSOR,
                     ):
                         if key in options:
@@ -417,6 +425,11 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # Show current values as defaults during reconfigure (0 = disabled)
         min_temp_default = self._min_temp if self._min_temp is not None else 0
         max_temp_default = self._max_temp if self._max_temp is not None else 0
+        max_sync_offset_default = (
+            self._max_sync_offset
+            if self._max_sync_offset is not None
+            else DEFAULT_MAX_SYNC_OFFSET
+        )
 
         schema_fields[vol.Optional(CONF_MIN_TEMP, default=min_temp_default)] = (
             number_selector
@@ -424,6 +437,9 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         schema_fields[vol.Optional(CONF_MAX_TEMP, default=max_temp_default)] = (
             number_selector
         )
+        schema_fields[
+            vol.Optional(CONF_MAX_SYNC_OFFSET, default=max_sync_offset_default)
+        ] = number_selector
 
         if sensor_names:
             default_options = [
@@ -513,6 +529,10 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
             CONF_MAX_TEMP,
             self.config_entry.data.get(CONF_MAX_TEMP),
         )
+        current_max_sync_offset = self.config_entry.options.get(
+            CONF_MAX_SYNC_OFFSET,
+            self.config_entry.data.get(CONF_MAX_SYNC_OFFSET),
+        )
 
         if current_default == DEFAULT_SENSOR_LAST_ACTIVE:
             use_last_active_sensor = True
@@ -523,6 +543,7 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
             default_sensor = user_input.get(CONF_DEFAULT_SENSOR)
             min_temp = user_input.get(CONF_MIN_TEMP) or None
             max_temp = user_input.get(CONF_MAX_TEMP) or None
+            max_sync_offset = user_input.get(CONF_MAX_SYNC_OFFSET) or None
 
             if default_sensor and default_sensor not in (
                 *sensor_names,
@@ -546,6 +567,7 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
                 )
                 data[CONF_MIN_TEMP] = min_temp
                 data[CONF_MAX_TEMP] = max_temp
+                data[CONF_MAX_SYNC_OFFSET] = max_sync_offset
 
                 return self.async_create_entry(title="", data=data)
 
@@ -595,6 +617,11 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
         # Show current values as defaults in options (0 = disabled)
         min_temp_default = current_min_temp if current_min_temp is not None else 0
         max_temp_default = current_max_temp if current_max_temp is not None else 0
+        max_sync_offset_default = (
+            current_max_sync_offset
+            if current_max_sync_offset is not None
+            else DEFAULT_MAX_SYNC_OFFSET
+        )
 
         schema_fields[vol.Optional(CONF_MIN_TEMP, default=min_temp_default)] = (
             number_selector
@@ -602,6 +629,9 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
         schema_fields[vol.Optional(CONF_MAX_TEMP, default=max_temp_default)] = (
             number_selector
         )
+        schema_fields[
+            vol.Optional(CONF_MAX_SYNC_OFFSET, default=max_sync_offset_default)
+        ] = number_selector
 
         data_schema = vol.Schema(schema_fields)
 
