@@ -145,3 +145,9 @@ mode: single
 ## Contributing
 
 Contributions are welcome! Feel free to create a new branch and submit pull a request!
+
+## Support the project
+
+Like having Thermostat Proxy? You can show your support with a coffee ☕️
+
+<a href="https://www.buymeacoffee.com/jianyu_li" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" style="height: 40px !important;width: 127px !important;" ></a>
