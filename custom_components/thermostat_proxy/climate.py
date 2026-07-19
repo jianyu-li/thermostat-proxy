@@ -141,6 +141,7 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
         ),
         vol.Optional(CONF_MIN_TEMP): vol.Coerce(float),
         vol.Optional(CONF_MAX_TEMP): vol.Coerce(float),
+        vol.Optional(CONF_MAX_SYNC_OFFSET): vol.Coerce(float),
     }
 )
 
@@ -177,6 +178,7 @@ async def async_setup_platform(
                 ),
                 user_min_temp=config.get(CONF_MIN_TEMP),
                 user_max_temp=config.get(CONF_MAX_TEMP),
+                max_sync_offset=config.get(CONF_MAX_SYNC_OFFSET),
             )
         ]
     )
@@ -345,6 +347,10 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self._cooldown_timer_unsub: Callable[[], None] | None = None
         self._sensor_precisions: dict[str, float] = {}
 
+    def _log_debug(self, msg: str, *args: Any) -> None:
+        """Log diagnostic information."""
+        _LOGGER.debug(msg, *args)
+
     async def async_added_to_hass(self) -> None:
         """Finish setup when entity is added."""
 
@@ -454,6 +460,13 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
         old_state: State | None = event.data.get("old_state")
         new_state: State | None = event.data.get("new_state")
+
+        self._log_debug(
+            "Real thermostat state event: old_state=%s, new_state=%s",
+            old_state.state if old_state else None,
+            new_state.state if new_state else None,
+        )
+
         self._real_state = new_state
         self._update_real_temperature_limits()
         if not new_state:
@@ -479,13 +492,13 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
             # Two-tiered matching: strict consumes, loose suppresses.
             if self._consume_real_target_request(real_target, strict_tolerance):
-                _LOGGER.debug(
+                self._log_debug(
                     "Real target %s matched pending request (strict)", real_target
                 )
             elif self._has_pending_real_target_request(
                 real_target, PENDING_REQUEST_TOLERANCE_MAX
             ):
-                _LOGGER.debug(
+                self._log_debug(
                     "Real target %s matched pending request (loose) - ignoring potential external change",
                     real_target,
                 )
@@ -495,12 +508,12 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 is_recent_write = time_since_write < POST_WRITE_GRACE_PERIOD
 
                 if was_not_controlling:
-                    _LOGGER.debug(
+                    self._log_debug(
                         "Thermostat returned to active state; updated target to %s without triggering external change",
                         real_target,
                     )
                 elif is_recent_write:
-                    _LOGGER.debug(
+                    self._log_debug(
                         "Real target %s changed during post-write grace period (%.1fs < %.1fs) - ignoring potential echo",
                         real_target,
                         time_since_write,
@@ -522,7 +535,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     )
                     self._handle_external_real_target_change(real_target)
             else:
-                _LOGGER.debug("Initial real target captured: %s", real_target)
+                self._log_debug("Initial real target captured: %s", real_target)
 
         self._schedule_target_realign()
         self.async_write_ha_state()
@@ -533,6 +546,13 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
         entity_id = event.data.get("entity_id")
         new_state: State | None = event.data.get("new_state")
+
+        self._log_debug(
+            "Sensor %s state event: new_state=%s",
+            entity_id,
+            new_state.state if new_state else None,
+        )
+
         if entity_id:
             self._sensor_states[entity_id] = new_state
             self._sensor_precisions[entity_id] = self._infer_sensor_precision(new_state)
@@ -956,6 +976,11 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 return
 
             temperature = kwargs.get(ATTR_TEMPERATURE)
+            self._log_debug(
+                "async_set_temperature called: temperature=%s, hvac_mode=%s",
+                temperature,
+                kwargs.get(ATTR_HVAC_MODE),
+            )
             requested = _coerce_temperature(temperature)
             if requested is None:
                 _LOGGER.warning(
@@ -1047,6 +1072,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             self.async_write_ha_state()
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
+        self._log_debug("async_set_hvac_mode called with mode: %s", hvac_mode)
         await self.hass.services.async_call(
             CLIMATE_DOMAIN,
             SERVICE_SET_HVAC_MODE,
@@ -1075,6 +1101,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         )
 
     async def async_set_preset_mode(self, preset_mode: str) -> None:
+        self._log_debug("async_set_preset_mode called with preset: %s", preset_mode)
         if preset_mode not in self._sensor_lookup:
             raise ValueError(f"Unknown preset '{preset_mode}'")
 
@@ -1282,6 +1309,14 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         async with self._command_lock:
             sensor_temp = self._get_active_sensor_temperature()
             real_current = self._get_real_current_temperature()
+
+            self._log_debug(
+                "_async_realign_real_target_from_sensor: virtual_target=%s, sensor_temp=%s, real_current=%s",
+                self._virtual_target_temperature,
+                sensor_temp,
+                real_current,
+            )
+
             if sensor_temp is None or real_current is None:
                 return
 
@@ -1302,6 +1337,9 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     delta = clamped_delta
 
             calculated_real_target = real_current + delta
+            self._log_debug(
+                "Calculated real target: %s (delta: %s)", calculated_real_target, delta
+            )
 
             # Overdrive Logic: Check if we are stalled
             # Stalled = Target not met AND Real Thermostat is Idle
@@ -1533,7 +1571,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         if not is_available:
             # Downgrade log level during startup to avoid noise
             if self.hass.state != CoreState.running:
-                _LOGGER.debug(
+                self._log_debug(
                     "Entity %s is not available yet during startup for %s",
                     entity_id,
                     self.entity_id,
