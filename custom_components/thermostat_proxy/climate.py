@@ -91,7 +91,7 @@ DEFAULT_PRECISION = 0.1
 PENDING_REQUEST_TOLERANCE_MIN = 0.05
 PENDING_REQUEST_TOLERANCE_MAX = 0.5
 MAX_TRACKED_REAL_TARGET_REQUESTS = 5
-PENDING_REQUEST_TIMEOUT = 30.0  # Seconds before a pending request expires
+PENDING_REQUEST_TIMEOUT = 120.0  # Seconds before a pending request expires
 EXTERNAL_CHANGE_TOLERANCE = (
     0.2  # Degrees to ignore as noise/rounding for external detection
 )
@@ -504,13 +504,14 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             self._last_real_target_temp = real_target
             strict_tolerance = self._pending_request_tolerance()
 
+            loose_tolerance = max(PENDING_REQUEST_TOLERANCE_MAX, (self._target_temp_step or 0) * 0.75)
             # Two-tiered matching: strict consumes, loose suppresses.
             if self._consume_real_target_request(real_target, strict_tolerance):
                 self._log_debug(
                     "Real target %s matched pending request (strict)", real_target
                 )
             elif self._has_pending_real_target_request(
-                real_target, PENDING_REQUEST_TOLERANCE_MAX
+                real_target, loose_tolerance
             ):
                 self._log_debug(
                     "Real target %s matched pending request (loose) - ignoring potential external change",
@@ -824,12 +825,12 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
     @property
     def precision(self) -> float:
-        base = self._precision_override or (
-            self._target_temp_step if self._target_temp_step else None
-        )
-        if base is not None:
-            return max(base, self._get_active_sensor_precision())
-        return max(super().precision, self._get_active_sensor_precision())
+        sensor = self._sensor_lookup.get(self._selected_sensor_name)
+        if sensor and not sensor.is_physical:
+            return self._sensor_precisions.get(sensor.entity_id, DEFAULT_PRECISION)
+        if self._precision_override is not None:
+            return self._precision_override
+        return super().precision
 
     def _get_active_sensor_precision(self) -> float:
         """Return the active sensor's inferred precision, or DEFAULT_PRECISION."""
