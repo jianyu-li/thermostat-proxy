@@ -427,7 +427,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             ): selector.NumberSelector(
                 selector.NumberSelectorConfig(
                     min=0,
-                    max=300,
+                    max=3600,
                     unit_of_measurement="seconds",
                     mode=selector.NumberSelectorMode.BOX,
                 )
@@ -633,7 +633,7 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
             selector.NumberSelector(
                 selector.NumberSelectorConfig(
                     min=0,
-                    max=300,
+                    max=3600,
                     unit_of_measurement="seconds",
                     mode=selector.NumberSelectorMode.BOX,
                 )

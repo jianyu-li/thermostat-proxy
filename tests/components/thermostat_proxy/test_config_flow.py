@@ -59,7 +59,7 @@ async def test_user_flow_success(hass: HomeAssistant) -> None:
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"],
         {
-            "cooldown_period": 10,
+            "cooldown_period": 1800,
             "physical_sensor_name": "Physical",
         },
     )
@@ -68,7 +68,7 @@ async def test_user_flow_success(hass: HomeAssistant) -> None:
     assert result["title"] == "Proxy"
     assert result["data"][CONF_THERMOSTAT] == "climate.real"
     assert result["data"][CONF_SENSORS][0]["name"] == "Remote"
-    assert result["data"][CONF_COOLDOWN_PERIOD] == 10
+    assert result["data"][CONF_COOLDOWN_PERIOD] == 1800
     assert result["data"][CONF_PHYSICAL_SENSOR_NAME] == "Physical"
 
 
@@ -98,11 +98,11 @@ async def test_options_flow(hass: HomeAssistant) -> None:
     result = await hass.config_entries.options.async_configure(
         result["flow_id"],
         user_input={
-            "cooldown_period": 30,
+            "cooldown_period": 1800,
             "default_sensor": "Remote",
         },
     )
 
     assert result["type"] == FlowResultType.CREATE_ENTRY
-    assert result["data"]["cooldown_period"] == 30
+    assert result["data"]["cooldown_period"] == 1800
     assert result["data"]["default_sensor"] == "Remote"
