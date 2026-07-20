@@ -99,10 +99,10 @@ async def test_log_formatting_preserves_decimals(mock_hass):
     
 @pytest.mark.asyncio
 async def test_pending_request_tolerance_covers_step(mock_hass):
-    """Test that _pending_request_tolerance incorporates target_temp_step."""
+    """Test that _pending_request_tolerance does not incorrectly incorporate target_temp_step to avoid ignoring manual changes."""
     proxy = create_proxy(mock_hass, target_temp_step=0.5)
     
-    # With 0.5 precision, precision / 2 is 0.25. 
-    # But step is 0.5, so tolerance should be at least 0.5.
+    # With 0.5 precision, precision / 2 is 0.25.
+    # It should not use step (0.5), so tolerance should be 0.25.
     tolerance = proxy._pending_request_tolerance()
-    assert tolerance == 0.5
+    assert tolerance == 0.25

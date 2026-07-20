@@ -81,6 +81,8 @@ from .const import (
     CONF_MAX_TEMP,
     CONF_MAX_SYNC_OFFSET,
     DEFAULT_MAX_SYNC_OFFSET,
+    CONF_DISABLE_AUTO_SWITCH,
+    DEFAULT_DISABLE_AUTO_SWITCH,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -179,6 +181,9 @@ async def async_setup_platform(
                 user_min_temp=config.get(CONF_MIN_TEMP),
                 user_max_temp=config.get(CONF_MAX_TEMP),
                 max_sync_offset=config.get(CONF_MAX_SYNC_OFFSET),
+                disable_auto_switch=config.get(
+                    CONF_DISABLE_AUTO_SWITCH, DEFAULT_DISABLE_AUTO_SWITCH
+                ),
             )
         ]
     )
@@ -228,6 +233,10 @@ async def async_setup_entry(
         CONF_MAX_SYNC_OFFSET,
         data.get(CONF_MAX_SYNC_OFFSET, DEFAULT_MAX_SYNC_OFFSET),
     )
+    disable_auto_switch = entry.options.get(
+        CONF_DISABLE_AUTO_SWITCH,
+        data.get(CONF_DISABLE_AUTO_SWITCH, DEFAULT_DISABLE_AUTO_SWITCH),
+    )
 
     if raw_default_sensor == DEFAULT_SENSOR_LAST_ACTIVE:
         use_last_active_sensor = True
@@ -258,6 +267,7 @@ async def async_setup_entry(
                 user_min_temp=user_min_temp,
                 user_max_temp=user_max_temp,
                 max_sync_offset=max_sync_offset,
+                disable_auto_switch=disable_auto_switch,
             )
         ]
     )
@@ -291,6 +301,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         user_min_temp: float | None = None,
         user_max_temp: float | None = None,
         max_sync_offset: float | None = None,
+        disable_auto_switch: bool = False,
     ) -> None:
         self.hass = hass
         if isinstance(cooldown_period, (int, float)):
@@ -338,6 +349,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self._user_min_temp: float | None = user_min_temp
         self._user_max_temp: float | None = user_max_temp
         self._max_sync_offset: float | None = max_sync_offset
+        self._disable_auto_switch: bool = disable_auto_switch
         self._target_temp_step: float | None = None
         self._precision_override: float | None = None
         self._entity_health: dict[str, bool] = {}
@@ -371,6 +383,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 self._sensor_states[sensor.entity_id]
             )
         self._temperature_unit = self._discover_temperature_unit()
+        if self._last_real_target_temp is None:
+            self._last_real_target_temp = self._get_real_target_temperature()
         if self._virtual_target_temperature is None:
             self._virtual_target_temperature = self._apply_target_constraints(
                 self._get_real_target_temperature()
@@ -519,21 +533,26 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                         time_since_write,
                         POST_WRITE_GRACE_PERIOD,
                     )
-                elif not math.isclose(
-                    real_target,
-                    previous_real_target,
-                    abs_tol=max(
-                        EXTERNAL_CHANGE_TOLERANCE,
-                        self._target_temp_step or 0,
-                    ),
-                ):
-                    _LOGGER.info(
-                        "Detected potential external change: %s -> %s (tolerance %s)",
-                        previous_real_target,
-                        real_target,
-                        EXTERNAL_CHANGE_TOLERANCE,
+                else:
+                    abs_tol = (
+                        (self._target_temp_step * 0.5)
+                        if self._target_temp_step
+                        else EXTERNAL_CHANGE_TOLERANCE
                     )
-                    self._handle_external_real_target_change(real_target)
+                    if not math.isclose(
+                        real_target,
+                        previous_real_target,
+                        abs_tol=abs_tol,
+                    ):
+                        _LOGGER.info(
+                            "Detected potential external change: %s -> %s (tolerance %s)",
+                            previous_real_target,
+                            real_target,
+                            abs_tol,
+                        )
+                        self._handle_external_real_target_change(
+                            real_target, previous_real_target
+                        )
             else:
                 self._log_debug("Initial real target captured: %s", real_target)
 
@@ -581,8 +600,35 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
         self._sensor_realign_task = self.hass.async_create_task(_run())
 
-    def _handle_external_real_target_change(self, real_target: float) -> None:
+    def _handle_external_real_target_change(
+        self, real_target: float, previous_real_target: float | None = None
+    ) -> None:
         """React to target changes made outside the proxy."""
+
+        if (
+            self._disable_auto_switch
+            and self._selected_sensor_name != self._physical_sensor_name
+        ):
+            if (
+                previous_real_target is not None
+                and self._virtual_target_temperature is not None
+            ):
+                delta = real_target - previous_real_target
+                derived = self._virtual_target_temperature + delta
+                new_virtual = self._apply_target_constraints(derived)
+                if new_virtual is not None:
+                    tolerance = (self.precision or DEFAULT_PRECISION) * 0.5
+                    if not math.isclose(
+                        self._virtual_target_temperature, new_virtual, abs_tol=tolerance
+                    ):
+                        self.hass.async_create_task(
+                            self._async_log_virtual_target_sync(
+                                new_virtual, real_target
+                            )
+                        )
+                        self._virtual_target_temperature = new_virtual
+                        self.async_write_ha_state()
+            return
 
         self._virtual_target_temperature = self._apply_target_constraints(real_target)
 
@@ -606,11 +652,9 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         """Return the tolerance used when matching pending requests."""
 
         precision = self.precision or DEFAULT_PRECISION
-        step = self._target_temp_step or 0
         return max(
             PENDING_REQUEST_TOLERANCE_MIN,
             min(PENDING_REQUEST_TOLERANCE_MAX, precision / 2),
-            step,
         )
 
     def _remove_real_target_request(self, real_target: float) -> None:
@@ -738,7 +782,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             return None
 
         previous_target = self._virtual_target_temperature
-        tolerance = max(self.precision or DEFAULT_PRECISION, 0.1)
+        tolerance = (self.precision or DEFAULT_PRECISION) * 0.5
         if previous_target is not None and math.isclose(
             previous_target, new_target, abs_tol=tolerance
         ):
