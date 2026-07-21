@@ -18,7 +18,9 @@ def mock_hass():
     hass.config = MagicMock()
     hass.config.units.temperature_unit = "°C"
     hass.services = MagicMock()
-    hass.async_create_task = MagicMock()
+    hass.async_create_task = MagicMock(
+        side_effect=lambda coro, *a, **kw: coro.close()
+    )
     return hass
 
 
