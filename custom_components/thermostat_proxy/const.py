@@ -21,9 +21,11 @@ CONF_COOLDOWN_PERIOD = "cooldown_period"
 CONF_MIN_TEMP = "min_temp"
 CONF_MAX_TEMP = "max_temp"
 CONF_MAX_SYNC_OFFSET = "max_sync_offset"
+CONF_DISABLE_AUTO_SWITCH = "disable_auto_switch"
 
 DEFAULT_COOLDOWN_PERIOD = 0
 DEFAULT_MAX_SYNC_OFFSET = 10.0
+DEFAULT_DISABLE_AUTO_SWITCH = False
 
 ATTR_ACTIVE_SENSOR = "active_sensor"
 ATTR_ACTIVE_SENSOR_ENTITY_ID = "active_sensor_entity_id"

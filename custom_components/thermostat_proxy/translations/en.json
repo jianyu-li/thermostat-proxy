@@ -50,7 +50,8 @@
           "cooldown_period": "Minimum adjustment interval (seconds)",
           "min_temp": "Minimum safe temperature limit (set to 0 to disable)",
           "max_temp": "Maximum safe temperature limit (set to 0 to disable)",
-          "max_sync_offset": "Maximum allowed offset from target temperature (0 to disable, default 10.0)"
+          "max_sync_offset": "Maximum allowed offset from target temperature (0 to disable, default 10.0)",
+          "disable_auto_switch": "Disable auto-switch to physical sensor"
         }
       }
     },
@@ -78,7 +79,8 @@
           "cooldown_period": "Minimum adjustment interval (seconds)",
           "min_temp": "Minimum safe temperature limit (set to 0 to disable)",
           "max_temp": "Maximum safe temperature limit (set to 0 to disable)",
-          "max_sync_offset": "Maximum allowed offset from target temperature (0 to disable, default 10.0)"
+          "max_sync_offset": "Maximum allowed offset from target temperature (0 to disable, default 10.0)",
+          "disable_auto_switch": "Disable auto-switch to physical sensor"
         }
       }
     },

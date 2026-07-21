@@ -80,8 +80,8 @@ async def test_effective_precision_coarsest_wins(mock_hass):
     proxy._sensor_states["sensor.1"] = State("sensor.1", "22.85")
     proxy._sensor_precisions["sensor.1"] = proxy._infer_sensor_precision(State("sensor.1", "22.85"))
     
-    # Thermostat is 0.5, Sensor is 0.01 -> Effective is 0.5
-    assert proxy.precision == 0.5
+    # Thermostat is 0.5, Sensor is 0.01 -> Display precision is 0.01, target step is 0.5
+    assert proxy.precision == 0.01
     assert proxy.target_temperature_step == 0.5
 
 @pytest.mark.asyncio
@@ -99,10 +99,10 @@ async def test_log_formatting_preserves_decimals(mock_hass):
     
 @pytest.mark.asyncio
 async def test_pending_request_tolerance_covers_step(mock_hass):
-    """Test that _pending_request_tolerance incorporates target_temp_step."""
+    """Test that _pending_request_tolerance does not incorrectly incorporate target_temp_step to avoid ignoring manual changes."""
     proxy = create_proxy(mock_hass, target_temp_step=0.5)
-    
-    # With 0.5 precision, precision / 2 is 0.25. 
-    # But step is 0.5, so tolerance should be at least 0.5.
+    proxy._sensor_precisions["sensor.1"] = 0.5
+    # With 0.5 precision, precision / 2 is 0.25.
+    # It should not use step (0.5), so tolerance should be 0.25.
     tolerance = proxy._pending_request_tolerance()
-    assert tolerance == 0.5
+    assert tolerance == 0.25

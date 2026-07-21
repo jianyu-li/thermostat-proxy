@@ -81,6 +81,8 @@ from .const import (
     CONF_MAX_TEMP,
     CONF_MAX_SYNC_OFFSET,
     DEFAULT_MAX_SYNC_OFFSET,
+    CONF_DISABLE_AUTO_SWITCH,
+    DEFAULT_DISABLE_AUTO_SWITCH,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -89,7 +91,7 @@ DEFAULT_PRECISION = 0.1
 PENDING_REQUEST_TOLERANCE_MIN = 0.05
 PENDING_REQUEST_TOLERANCE_MAX = 0.5
 MAX_TRACKED_REAL_TARGET_REQUESTS = 5
-PENDING_REQUEST_TIMEOUT = 30.0  # Seconds before a pending request expires
+PENDING_REQUEST_TIMEOUT = 120.0  # Seconds before a pending request expires
 EXTERNAL_CHANGE_TOLERANCE = (
     0.2  # Degrees to ignore as noise/rounding for external detection
 )
@@ -142,6 +144,9 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
         vol.Optional(CONF_MIN_TEMP): vol.Coerce(float),
         vol.Optional(CONF_MAX_TEMP): vol.Coerce(float),
         vol.Optional(CONF_MAX_SYNC_OFFSET): vol.Coerce(float),
+        vol.Optional(
+            CONF_DISABLE_AUTO_SWITCH, default=DEFAULT_DISABLE_AUTO_SWITCH
+        ): cv.boolean,
     }
 )
 
@@ -179,6 +184,9 @@ async def async_setup_platform(
                 user_min_temp=config.get(CONF_MIN_TEMP),
                 user_max_temp=config.get(CONF_MAX_TEMP),
                 max_sync_offset=config.get(CONF_MAX_SYNC_OFFSET),
+                disable_auto_switch=config.get(
+                    CONF_DISABLE_AUTO_SWITCH, DEFAULT_DISABLE_AUTO_SWITCH
+                ),
             )
         ]
     )
@@ -228,6 +236,10 @@ async def async_setup_entry(
         CONF_MAX_SYNC_OFFSET,
         data.get(CONF_MAX_SYNC_OFFSET, DEFAULT_MAX_SYNC_OFFSET),
     )
+    disable_auto_switch = entry.options.get(
+        CONF_DISABLE_AUTO_SWITCH,
+        data.get(CONF_DISABLE_AUTO_SWITCH, DEFAULT_DISABLE_AUTO_SWITCH),
+    )
 
     if raw_default_sensor == DEFAULT_SENSOR_LAST_ACTIVE:
         use_last_active_sensor = True
@@ -258,6 +270,7 @@ async def async_setup_entry(
                 user_min_temp=user_min_temp,
                 user_max_temp=user_max_temp,
                 max_sync_offset=max_sync_offset,
+                disable_auto_switch=disable_auto_switch,
             )
         ]
     )
@@ -291,6 +304,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         user_min_temp: float | None = None,
         user_max_temp: float | None = None,
         max_sync_offset: float | None = None,
+        disable_auto_switch: bool = False,
     ) -> None:
         self.hass = hass
         if isinstance(cooldown_period, (int, float)):
@@ -338,6 +352,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self._user_min_temp: float | None = user_min_temp
         self._user_max_temp: float | None = user_max_temp
         self._max_sync_offset: float | None = max_sync_offset
+        self._disable_auto_switch: bool = disable_auto_switch
         self._target_temp_step: float | None = None
         self._precision_override: float | None = None
         self._entity_health: dict[str, bool] = {}
@@ -371,6 +386,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 self._sensor_states[sensor.entity_id]
             )
         self._temperature_unit = self._discover_temperature_unit()
+        if self._last_real_target_temp is None:
+            self._last_real_target_temp = self._get_real_target_temperature()
         if self._virtual_target_temperature is None:
             self._virtual_target_temperature = self._apply_target_constraints(
                 self._get_real_target_temperature()
@@ -490,14 +507,17 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             self._last_real_target_temp = real_target
             strict_tolerance = self._pending_request_tolerance()
 
+            # 75% of step size accounts for rounding drift without swallowing real changes
+            loose_tolerance = max(
+                PENDING_REQUEST_TOLERANCE_MAX,
+                (self._target_temp_step or 0) * 0.75,
+            )
             # Two-tiered matching: strict consumes, loose suppresses.
             if self._consume_real_target_request(real_target, strict_tolerance):
                 self._log_debug(
                     "Real target %s matched pending request (strict)", real_target
                 )
-            elif self._has_pending_real_target_request(
-                real_target, PENDING_REQUEST_TOLERANCE_MAX
-            ):
+            elif self._has_pending_real_target_request(real_target, loose_tolerance):
                 self._log_debug(
                     "Real target %s matched pending request (loose) - ignoring potential external change",
                     real_target,
@@ -519,21 +539,26 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                         time_since_write,
                         POST_WRITE_GRACE_PERIOD,
                     )
-                elif not math.isclose(
-                    real_target,
-                    previous_real_target,
-                    abs_tol=max(
-                        EXTERNAL_CHANGE_TOLERANCE,
-                        self._target_temp_step or 0,
-                    ),
-                ):
-                    _LOGGER.info(
-                        "Detected potential external change: %s -> %s (tolerance %s)",
-                        previous_real_target,
-                        real_target,
-                        EXTERNAL_CHANGE_TOLERANCE,
+                else:
+                    abs_tol = (
+                        (self._target_temp_step * 0.5)
+                        if self._target_temp_step
+                        else EXTERNAL_CHANGE_TOLERANCE
                     )
-                    self._handle_external_real_target_change(real_target)
+                    if not math.isclose(
+                        real_target,
+                        previous_real_target,
+                        abs_tol=abs_tol,
+                    ):
+                        _LOGGER.info(
+                            "Detected potential external change: %s -> %s (tolerance %s)",
+                            previous_real_target,
+                            real_target,
+                            abs_tol,
+                        )
+                        self._handle_external_real_target_change(
+                            real_target, previous_real_target
+                        )
             else:
                 self._log_debug("Initial real target captured: %s", real_target)
 
@@ -581,8 +606,41 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
         self._sensor_realign_task = self.hass.async_create_task(_run())
 
-    def _handle_external_real_target_change(self, real_target: float) -> None:
+    def _handle_external_real_target_change(
+        self, real_target: float, previous_real_target: float | None = None
+    ) -> None:
         """React to target changes made outside the proxy."""
+
+        if (
+            self._disable_auto_switch
+            and self._selected_sensor_name != self._physical_sensor_name
+        ):
+            if (
+                previous_real_target is not None
+                and self._virtual_target_temperature is not None
+            ):
+                delta = real_target - previous_real_target
+                derived = self._virtual_target_temperature + delta
+                new_virtual = self._apply_target_constraints(derived)
+                if new_virtual is not None:
+                    tolerance = (self.precision or DEFAULT_PRECISION) * 0.5
+                    if not math.isclose(
+                        self._virtual_target_temperature, new_virtual, abs_tol=tolerance
+                    ):
+                        self.hass.async_create_task(
+                            self._async_log_virtual_target_sync(
+                                new_virtual, real_target
+                            )
+                        )
+                        self._virtual_target_temperature = new_virtual
+                        self.async_write_ha_state()
+            else:
+                self._log_debug(
+                    "Skipping external change delta: previous_real_target=%s, virtual_target=%s",
+                    previous_real_target,
+                    self._virtual_target_temperature,
+                )
+            return
 
         self._virtual_target_temperature = self._apply_target_constraints(real_target)
 
@@ -606,11 +664,9 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         """Return the tolerance used when matching pending requests."""
 
         precision = self.precision or DEFAULT_PRECISION
-        step = self._target_temp_step or 0
         return max(
             PENDING_REQUEST_TOLERANCE_MIN,
             min(PENDING_REQUEST_TOLERANCE_MAX, precision / 2),
-            step,
         )
 
     def _remove_real_target_request(self, real_target: float) -> None:
@@ -738,7 +794,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             return None
 
         previous_target = self._virtual_target_temperature
-        tolerance = max(self.precision or DEFAULT_PRECISION, 0.1)
+        tolerance = (self.precision or DEFAULT_PRECISION) * 0.5
         if previous_target is not None and math.isclose(
             previous_target, new_target, abs_tol=tolerance
         ):
@@ -780,12 +836,12 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
     @property
     def precision(self) -> float:
-        base = self._precision_override or (
-            self._target_temp_step if self._target_temp_step else None
-        )
-        if base is not None:
-            return max(base, self._get_active_sensor_precision())
-        return max(super().precision, self._get_active_sensor_precision())
+        sensor = self._sensor_lookup.get(self._selected_sensor_name)
+        if sensor and not sensor.is_physical:
+            return self._sensor_precisions.get(sensor.entity_id, DEFAULT_PRECISION)
+        if self._precision_override is not None:
+            return self._precision_override
+        return super().precision
 
     def _get_active_sensor_precision(self) -> float:
         """Return the active sensor's inferred precision, or DEFAULT_PRECISION."""
@@ -1486,8 +1542,6 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             self._selected_sensor_name = self._configured_default_sensor
         elif restored_sensor in self._sensor_lookup:
             self._selected_sensor_name = restored_sensor
-        elif self._configured_default_sensor:
-            self._selected_sensor_name = self._configured_default_sensor
 
         restored_virtual = _coerce_temperature(
             last_state.attributes.get(ATTR_TEMPERATURE)
@@ -1922,13 +1976,6 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         if self._real_state:
             return self._real_state.attributes.get("fan_modes")
         return None
-
-    @property
-    def supported_features(self) -> ClimateEntityFeature:
-        """Return the list of supported features."""
-        # Mix in base features with dynamically detected fan support
-        features = self._attr_supported_features
-        return features
 
 
 def _coerce_temperature(value: Any) -> float | None:
