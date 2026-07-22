@@ -1,4 +1,5 @@
 """Tests for the disable_auto_switch configuration."""
+
 from unittest.mock import AsyncMock, MagicMock
 import pytest
 
@@ -21,7 +22,7 @@ def mock_hass():
     return hass
 
 
-def create_proxy(hass, disable_auto_switch=False):
+def create_proxy(hass, disable_auto_switch=False, hvac_mode=HVACMode.HEAT):
     """Helper to create a configured CustomThermostatEntity."""
     proxy = CustomThermostatEntity(
         hass=hass,
@@ -34,61 +35,77 @@ def create_proxy(hass, disable_auto_switch=False):
         use_last_active_sensor=False,
         disable_auto_switch=disable_auto_switch,
     )
-    
-    # Mock physical thermostat state
+
+    supported = (
+        ClimateEntityFeature.TARGET_TEMPERATURE
+        | ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
+        | ClimateEntityFeature.PRESET_MODE
+    )
+
     mock_real_state = State(
         "climate.real",
-        HVACMode.HEAT,
+        hvac_mode,
         {
             "current_temperature": 20.0,
             "temperature": 22.0,
+            "target_temp_low": 18.0,
+            "target_temp_high": 24.0,
             "target_temp_step": 1.0,
-            "supported_features": ClimateEntityFeature.TARGET_TEMPERATURE,
-        }
+            "supported_features": supported,
+        },
     )
-    hass.states.get.side_effect = lambda entity_id: mock_real_state if entity_id == "climate.real" else None
+    hass.states.get.side_effect = lambda entity_id: (
+        mock_real_state if entity_id == "climate.real" else None
+    )
     proxy._real_state = mock_real_state
     proxy._update_real_temperature_limits()
-    
+
     proxy._temperature_unit = "°C"
     proxy._sensor_states["sensor.remote"] = State("sensor.remote", "24.0")
     proxy._virtual_target_temperature = 26.0
+    proxy._virtual_target_temperature_low = 18.0
+    proxy._virtual_target_temperature_high = 24.0
     proxy._selected_sensor_name = "Remote"
     proxy._last_real_target_temp = 22.0
+    proxy._last_real_target_temp_low = 18.0
+    proxy._last_real_target_temp_high = 24.0
     proxy.async_write_ha_state = MagicMock()
     return proxy
 
 
+@pytest.mark.parametrize(
+    "hvac_mode", [HVACMode.HEAT, HVACMode.COOL, HVACMode.HEAT_COOL, HVACMode.AUTO]
+)
 @pytest.mark.asyncio
-async def test_auto_switch_enabled(mock_hass):
-    """Test that proxy switches to physical sensor when external change is detected (default)."""
-    proxy = create_proxy(mock_hass, disable_auto_switch=False)
-    
-    # Simulate an external change (real target changes to 23.0, previous was 22.0)
-    proxy._handle_external_real_target_change(23.0, 22.0)
-    
-    # Should switch to the physical sensor
-    assert proxy._selected_sensor_name == "Physical"
-    # Virtual target should become the real target
-    assert proxy._virtual_target_temperature == 23.0
+async def test_auto_switch_enabled(mock_hass, hvac_mode):
+    """Test that proxy switches to physical sensor when external change is detected in all modes."""
+    proxy = create_proxy(mock_hass, disable_auto_switch=False, hvac_mode=hvac_mode)
+
+    if hvac_mode in (HVACMode.HEAT_COOL, HVACMode.AUTO):
+        proxy._detect_external_dual_target_change(19.0, 24.0, was_not_controlling=False)
+        assert proxy._selected_sensor_name == "Physical"
+        assert proxy._virtual_target_temperature_low == 19.0
+    else:
+        proxy._handle_external_real_target_change(23.0, 22.0)
+        assert proxy._selected_sensor_name == "Physical"
+        assert proxy._virtual_target_temperature == 23.0
 
 
+@pytest.mark.parametrize(
+    "hvac_mode", [HVACMode.HEAT, HVACMode.COOL, HVACMode.HEAT_COOL, HVACMode.AUTO]
+)
 @pytest.mark.asyncio
-async def test_auto_switch_disabled(mock_hass):
-    """Test that proxy maintains sensor and updates virtual target when auto-switch is disabled."""
-    proxy = create_proxy(mock_hass, disable_auto_switch=True)
-    
-    # Current state: 
-    # Sensor temp = 24.0
-    # Real current = 20.0
-    # Virtual target = 26.0
-    # Real target was = 22.0
-    
-    # Simulate an external change (real target changes to 24.0, previous was 22.0)
-    proxy._handle_external_real_target_change(24.0, 22.0)
-    
-    # Should NOT switch to the physical sensor
-    assert proxy._selected_sensor_name == "Remote"
-    
-    # Virtual target should be updated by the delta: 26.0 + (24.0 - 22.0) = 28.0
-    assert proxy._virtual_target_temperature == 28.0
+async def test_auto_switch_disabled(mock_hass, hvac_mode):
+    """Test that proxy maintains sensor and updates virtual targets when auto-switch is disabled across all modes."""
+    proxy = create_proxy(mock_hass, disable_auto_switch=True, hvac_mode=hvac_mode)
+
+    if hvac_mode in (HVACMode.HEAT_COOL, HVACMode.AUTO):
+        proxy._detect_external_dual_target_change(20.0, 24.0, was_not_controlling=False)
+        assert proxy._selected_sensor_name == "Remote"
+        # Real low changed +2.0 (18.0 -> 20.0), virtual low 18.0 + 2.0 = 20.0
+        assert proxy._virtual_target_temperature_low == 20.0
+    else:
+        proxy._handle_external_real_target_change(24.0, 22.0)
+        assert proxy._selected_sensor_name == "Remote"
+        # Virtual target updated by delta: 26.0 + (24.0 - 22.0) = 28.0
+        assert proxy._virtual_target_temperature == 28.0
