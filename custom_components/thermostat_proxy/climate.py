@@ -714,10 +714,13 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     ):
                         self.hass.async_create_task(
                             self._async_log_virtual_target_sync(
-                                new_virtual, real_target
+                                new_virtual,
+                                real_target,
+                                previous_real_target=previous_real_target,
                             )
                         )
                         self._virtual_target_temperature = new_virtual
+                        self._last_real_write_time = time.monotonic()
                         self.async_write_ha_state()
             else:
                 self._log_debug(
@@ -816,6 +819,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     new_high = self._apply_target_constraints(derived)
                     if new_high is not None:
                         self._virtual_target_temperature_high = new_high
+            self._last_real_write_time = time.monotonic()
             self.async_write_ha_state()
             return
 
@@ -1452,7 +1456,10 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         )
 
     async def _async_log_virtual_target_sync(
-        self, virtual_target: float, real_target: float
+        self,
+        virtual_target: float,
+        real_target: float,
+        previous_real_target: float | None = None,
     ) -> None:
         """Record a logbook entry when we auto-sync to the real thermostat."""
 
@@ -1471,30 +1478,59 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         virtual_val = self._round_log_temperature_value(virtual_target)
 
         segments: list[str] = []
-        if real_target_display is not None:
-            segments.append(f"real_target={real_target_display}{unit}")
-        if real_current_display is not None:
-            segments.append(f"real_current_temperature={real_current_display}{unit}")
-            real_math = self._format_math_real_to_virtual(
-                real_target_val,
-                real_current_val,
-                unit,
-            )
-            if real_math:
-                segments.append(real_math)
-        if sensor_display is not None:
-            segments.append(f"sensor_temperature={sensor_display}{unit}")
-        if virtual_display is not None:
-            virtual_math = self._format_math_sensor_plus_delta(
-                sensor_val,
-                real_target_val,
-                real_current_val,
-                virtual_val,
-                unit,
-            )
-            if virtual_math:
+        if (
+            previous_real_target is not None
+            and self._disable_auto_switch
+            and self._selected_sensor_name != self._physical_sensor_name
+        ):
+            prev_display = self._format_log_temperature(previous_real_target)
+            prev_val = self._round_log_temperature_value(previous_real_target)
+            if real_target_display is not None:
+                segments.append(f"real_target={real_target_display}{unit}")
+            if prev_display is not None:
+                segments.append(f"previous_real_target={prev_display}{unit}")
+            if sensor_display is not None:
+                segments.append(f"sensor_temperature={sensor_display}{unit}")
+            if (
+                virtual_display is not None
+                and prev_val is not None
+                and real_target_val is not None
+                and virtual_val is not None
+            ):
+                delta = real_target_val - prev_val
+                old_virtual = virtual_val - delta
+                op = "+" if delta >= 0 else "-"
+                abs_delta = abs(delta)
+                virtual_math = f"{old_virtual:.1f}{unit} {op} {abs_delta:.1f}{unit} = {virtual_display}{unit}"
                 segments.append(virtual_math)
             segments.append(f"virtual_target={virtual_display}{unit}")
+        else:
+            if real_target_display is not None:
+                segments.append(f"real_target={real_target_display}{unit}")
+            if real_current_display is not None:
+                segments.append(
+                    f"real_current_temperature={real_current_display}{unit}"
+                )
+                real_math = self._format_math_real_to_virtual(
+                    real_target_val,
+                    real_current_val,
+                    unit,
+                )
+                if real_math:
+                    segments.append(real_math)
+            if sensor_display is not None:
+                segments.append(f"sensor_temperature={sensor_display}{unit}")
+            if virtual_display is not None:
+                virtual_math = self._format_math_sensor_plus_delta(
+                    sensor_val,
+                    real_target_val,
+                    real_current_val,
+                    virtual_val,
+                    unit,
+                )
+                if virtual_math:
+                    segments.append(virtual_math)
+                segments.append(f"virtual_target={virtual_display}{unit}")
         if not segments:
             segments.append("no context available")
 
