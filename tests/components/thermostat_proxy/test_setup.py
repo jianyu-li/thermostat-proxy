@@ -1,4 +1,5 @@
 """Tests for integration setup and wiring."""
+
 from unittest.mock import patch
 import pytest
 
@@ -17,6 +18,7 @@ from custom_components.thermostat_proxy.const import (
 def mock_services(hass: HomeAssistant):
     """Mock service calls to avoid ServiceNotFound errors, but allow custom calls."""
     from homeassistant.core import ServiceRegistry
+
     real_async_call = ServiceRegistry.async_call
 
     async def mock_call(
@@ -28,9 +30,10 @@ def mock_services(hass: HomeAssistant):
         target=None,
     ):
         entity_id = (service_data or {}).get("entity_id")
-        if domain == "climate" and (entity_id == "climate.thermostat_proxy" or (
-            isinstance(entity_id, list) and "climate.thermostat_proxy" in entity_id
-        )):
+        if domain == "climate" and (
+            entity_id == "climate.thermostat_proxy"
+            or (isinstance(entity_id, list) and "climate.thermostat_proxy" in entity_id)
+        ):
             return await real_async_call(
                 hass.services, domain, service, service_data, blocking, context, target
             )
@@ -73,18 +76,19 @@ async def test_async_setup_entry_wiring(hass: HomeAssistant) -> None:
         assert getattr(entity, "_disable_auto_switch", False) is True
 
 
+@pytest.mark.parametrize("mode", ["heat", "cool"])
 @pytest.mark.asyncio
-async def test_external_change_real_flow(hass: HomeAssistant) -> None:
-    """Test that a 1-degree change on the physical thermostat is correctly detected and shifts the proxy target by 1 degree."""
+async def test_external_change_real_flow(hass: HomeAssistant, mode: str) -> None:
+    """Test that a 1-degree change on the physical thermostat is correctly detected and shifts the proxy target by 1 degree across single-target modes."""
     # First, mock the states in the state machine
     hass.states.async_set(
         "climate.real",
-        "heat",
+        mode,
         {
             "current_temperature": 20.0,
             "temperature": 22.0,
             "target_temp_step": 1.0,
-            "supported_features": 1, # TARGET_TEMPERATURE
+            "supported_features": 1,  # TARGET_TEMPERATURE
         },
     )
     hass.states.async_set("sensor.remote", "24.0")
@@ -100,7 +104,7 @@ async def test_external_change_real_flow(hass: HomeAssistant) -> None:
             CONF_DISABLE_AUTO_SWITCH: True,
         },
         source="user",
-        unique_id="proxy",
+        unique_id=f"proxy_{mode}",
     )
     entry.add_to_hass(hass)
 
@@ -131,7 +135,7 @@ async def test_external_change_real_flow(hass: HomeAssistant) -> None:
     # Simulate external change on real thermostat target: 22.0 -> 21.0 (-1.0 degree)
     hass.states.async_set(
         "climate.real",
-        "heat",
+        mode,
         {
             "current_temperature": 20.0,
             "temperature": 21.0,
@@ -144,4 +148,3 @@ async def test_external_change_real_flow(hass: HomeAssistant) -> None:
     # The virtual target should also decrease by 1 degree: 26.0 -> 25.0
     proxy_state = hass.states.get("climate.thermostat_proxy")
     assert proxy_state.attributes["temperature"] == 25.0
-

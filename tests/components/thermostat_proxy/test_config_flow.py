@@ -1,5 +1,6 @@
 """Test the Thermostat Proxy config flow."""
-from unittest.mock import patch, AsyncMock
+
+from unittest.mock import patch
 import pytest
 
 from homeassistant import config_entries
@@ -7,14 +8,21 @@ from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.thermostat_proxy.const import DOMAIN, CONF_THERMOSTAT, CONF_SENSORS, CONF_SENSOR_NAME, CONF_SENSOR_ENTITY_ID, CONF_PHYSICAL_SENSOR_NAME, CONF_COOLDOWN_PERIOD
-from custom_components.thermostat_proxy import config_flow
+from custom_components.thermostat_proxy.const import (
+    DOMAIN,
+    CONF_THERMOSTAT,
+    CONF_SENSORS,
+    CONF_PHYSICAL_SENSOR_NAME,
+    CONF_COOLDOWN_PERIOD,
+)
+
 
 @pytest.fixture(autouse=True)
 def mock_services():
     """Mock service calls to avoid ServiceNotFound errors."""
     with patch("homeassistant.core.ServiceRegistry.async_call", return_value=True):
         yield
+
 
 @pytest.mark.asyncio
 async def test_user_flow_success(hass: HomeAssistant) -> None:

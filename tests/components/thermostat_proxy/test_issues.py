@@ -1,6 +1,7 @@
 """Tests simulating scenarios in GitHub issues #31 and #32."""
+
 import time
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 import pytest
 
 from homeassistant.core import HomeAssistant, State
@@ -18,15 +19,16 @@ def mock_hass():
     hass.config = MagicMock()
     hass.config.units.temperature_unit = "°C"
     hass.services = MagicMock()
-    hass.async_create_task = MagicMock(
-        side_effect=lambda coro, *a, **kw: coro.close()
-    )
+    hass.async_create_task = MagicMock(side_effect=lambda coro, *a, **kw: coro.close())
     return hass
 
 
+@pytest.mark.parametrize(
+    "hvac_mode", [HVACMode.HEAT, HVACMode.COOL, HVACMode.HEAT_COOL, HVACMode.AUTO]
+)
 @pytest.mark.asyncio
-async def test_issue_31_decimal_current_temperature(mock_hass):
-    """Test that a remote sensor with decimals displays decimals for current temperature."""
+async def test_issue_31_decimal_current_temperature(mock_hass, hvac_mode):
+    """Test that a remote sensor with decimals displays decimals for current temperature across all modes."""
     proxy = CustomThermostatEntity(
         hass=mock_hass,
         name="Test Proxy",
@@ -40,15 +42,22 @@ async def test_issue_31_decimal_current_temperature(mock_hass):
 
     mock_real_state = State(
         "climate.real",
-        HVACMode.HEAT,
+        hvac_mode,
         {
             "current_temperature": 20.0,
             "temperature": 22.0,
+            "target_temp_low": 18.0,
+            "target_temp_high": 24.0,
             "target_temp_step": 1.0,
-            "supported_features": ClimateEntityFeature.TARGET_TEMPERATURE,
-        }
+            "supported_features": (
+                ClimateEntityFeature.TARGET_TEMPERATURE
+                | ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
+            ),
+        },
     )
-    mock_hass.states.get.side_effect = lambda entity_id: mock_real_state if entity_id == "climate.real" else None
+    mock_hass.states.get.side_effect = lambda entity_id: (
+        mock_real_state if entity_id == "climate.real" else None
+    )
     proxy._real_state = mock_real_state
     proxy._update_real_temperature_limits()
 
@@ -62,9 +71,12 @@ async def test_issue_31_decimal_current_temperature(mock_hass):
     assert proxy.precision == 0.1
 
 
+@pytest.mark.parametrize(
+    "hvac_mode", [HVACMode.HEAT, HVACMode.COOL, HVACMode.HEAT_COOL, HVACMode.AUTO]
+)
 @pytest.mark.asyncio
-async def test_issue_32_floor_rounding_thermostat_loop(mock_hass):
-    """Test that a floor-rounding physical thermostat reporting a floored target outside post-write grace period triggers external change detection."""
+async def test_issue_32_floor_rounding_thermostat_loop(mock_hass, hvac_mode):
+    """Test floor-rounding external change suppression across all HVAC modes."""
     proxy = CustomThermostatEntity(
         hass=mock_hass,
         name="Test Proxy",
@@ -81,15 +93,22 @@ async def test_issue_32_floor_rounding_thermostat_loop(mock_hass):
     # The proxy is operating in Fahrenheit, target_temp_step = 1.8 (Fahrenheit)
     mock_real_state = State(
         "climate.real",
-        HVACMode.HEAT,
+        hvac_mode,
         {
             "current_temperature": 75.0,
             "temperature": 73.4,  # floored Celsius value 23.0°C converted to Fahrenheit
+            "target_temp_low": 68.0,
+            "target_temp_high": 75.0,
             "target_temp_step": 1.8,
-            "supported_features": ClimateEntityFeature.TARGET_TEMPERATURE,
-        }
+            "supported_features": (
+                ClimateEntityFeature.TARGET_TEMPERATURE
+                | ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
+            ),
+        },
     )
-    mock_hass.states.get.side_effect = lambda entity_id: mock_real_state if entity_id == "climate.real" else None
+    mock_hass.states.get.side_effect = lambda entity_id: (
+        mock_real_state if entity_id == "climate.real" else None
+    )
     proxy._real_state = mock_real_state
     proxy._update_real_temperature_limits()
 
@@ -114,24 +133,30 @@ async def test_issue_32_floor_rounding_thermostat_loop(mock_hass):
     event.data = {
         "old_state": State(
             "climate.real",
-            HVACMode.HEAT,
+            hvac_mode,
             {
                 "current_temperature": 75.0,
                 "temperature": 74.5,
                 "target_temp_step": 1.8,
-                "supported_features": ClimateEntityFeature.TARGET_TEMPERATURE,
-            }
+                "supported_features": (
+                    ClimateEntityFeature.TARGET_TEMPERATURE
+                    | ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
+                ),
+            },
         ),
         "new_state": State(
             "climate.real",
-            HVACMode.HEAT,
+            hvac_mode,
             {
                 "current_temperature": 75.0,
                 "temperature": 73.4,
                 "target_temp_step": 1.8,
-                "supported_features": ClimateEntityFeature.TARGET_TEMPERATURE,
-            }
-        )
+                "supported_features": (
+                    ClimateEntityFeature.TARGET_TEMPERATURE
+                    | ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
+                ),
+            },
+        ),
     }
     proxy._async_handle_real_state_event(event)
 
