@@ -4,11 +4,13 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    target-branch: "beta"
     commit-message:
       prefix: "chore(deps)"
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+    target-branch: "beta"
     commit-message:
       prefix: "chore(deps)"
