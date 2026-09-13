@@ -432,6 +432,12 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 or self._get_active_sensor_temperature()
                 or self._get_real_current_temperature()
             )
+        self._initialize_missing_virtual_range_targets()
+        self._enforce_hvac_mode_restrictions()
+        await self._async_subscribe_to_states()
+
+    def _initialize_missing_virtual_range_targets(self) -> None:
+        """Seed missing endpoints without replacing established virtual targets."""
         if self._virtual_target_temperature_low is None:
             real_low = self._get_real_target_temperature_low()
             if real_low is not None:
@@ -444,8 +450,6 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 self._virtual_target_temperature_high = self._apply_target_constraints(
                     real_high
                 )
-        self._enforce_hvac_mode_restrictions()
-        await self._async_subscribe_to_states()
 
     async def _async_subscribe_to_states(self) -> None:
         """Listen for updates to real thermostat and sensors."""
@@ -592,6 +596,10 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     self._virtual_target_temperature_low = (
                         self._virtual_target_temperature
                     )
+
+        # Targets may arrive after the mode changes, or on first appearance.
+        if self.is_range_mode:
+            self._initialize_missing_virtual_range_targets()
 
         self._temperature_unit = self._discover_temperature_unit()
         real_target = self._get_real_target_temperature()
@@ -1764,6 +1772,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         """Push a new target temperature to the real thermostat based on the active sensor."""
 
         if self.is_range_mode:
+            self._initialize_missing_virtual_range_targets()
             if (
                 self._virtual_target_temperature_low is None
                 and self._virtual_target_temperature_high is None
