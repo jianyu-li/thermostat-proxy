@@ -151,6 +151,49 @@ def test_sanitize_uninitialized_real_temperature_32f_zero_humidity(hass):
     assert proxy._get_real_current_temperature() is None
 
 
+def test_sanitize_uninitialized_real_temperature_missing_humidity(hass):
+    """Test that 32°F with missing humidity in Fahrenheit is treated as uninitialized."""
+    proxy = create_proxy(hass, real_min_temp=30.0)
+
+    # Physical thermostat reports exactly 32.0°F and no humidity attribute
+    hass.states.async_set(
+        "climate.real",
+        HVACMode.COOL,
+        {
+            "current_temperature": 32.0,
+            "temperature": 74.0,
+            "min_temp": 30.0,
+            "max_temp": 80.0,
+        },
+    )
+    proxy._real_state = hass.states.get("climate.real")
+    proxy._update_real_temperature_limits()
+
+    assert proxy._get_real_current_temperature() is None
+
+
+def test_sanitize_uninitialized_real_temperature_with_normal_humidity(hass):
+    """Test that 32°F even with normal humidity (e.g. 47%) is treated as uninitialized."""
+    proxy = create_proxy(hass, real_min_temp=45.0)
+
+    # Physical thermostat reconnects reporting 32.0°F and 47% humidity
+    hass.states.async_set(
+        "climate.real",
+        HVACMode.COOL,
+        {
+            "current_temperature": 32.0,
+            "temperature": 73.0,
+            "min_temp": 45.0,
+            "max_temp": 80.0,
+            "current_humidity": 47.0,
+        },
+    )
+    proxy._real_state = hass.states.get("climate.real")
+    proxy._update_real_temperature_limits()
+
+    assert proxy._get_real_current_temperature() is None
+
+
 def test_format_math_real_adjustment_shows_clamping():
     """Test that log math formatting clearly notes clamping when desired_val differs."""
     proxy = create_proxy(None)

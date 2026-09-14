@@ -503,29 +503,31 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         except ValueError:
             current_mode = None
 
-        if current_mode in UNSUPPORTED_REMOTE_MODES:
-            if self._selected_sensor_name != self._physical_sensor_name:
-                _LOGGER.info(
-                    "Physical thermostat is in %s mode (unsupported for remote sensors); "
-                    "forcing '%s' preset to ensure safety",
-                    hvac_mode_str,
-                    self._physical_sensor_name,
+        if (
+            current_mode in UNSUPPORTED_REMOTE_MODES
+            and self._selected_sensor_name != self._physical_sensor_name
+        ):
+            _LOGGER.info(
+                "Physical thermostat is in %s mode (unsupported for remote sensors); "
+                "forcing '%s' preset to ensure safety",
+                hvac_mode_str,
+                self._physical_sensor_name,
+            )
+            self._selected_sensor_name = self._physical_sensor_name
+
+            async def _log_fallback() -> None:
+                await self.hass.services.async_call(
+                    LOGBOOK_DOMAIN,
+                    LOGBOOK_SERVICE_LOG,
+                    {
+                        "name": self.name,
+                        "entity_id": self.entity_id,
+                        "message": f"Automatically reverted to '{self._physical_sensor_name}' because '{hvac_mode_str}' mode does not support remote sensors",
+                    },
+                    blocking=False,
                 )
-                self._selected_sensor_name = self._physical_sensor_name
 
-                async def _log_fallback() -> None:
-                    await self.hass.services.async_call(
-                        LOGBOOK_DOMAIN,
-                        LOGBOOK_SERVICE_LOG,
-                        {
-                            "name": self.name,
-                            "entity_id": self.entity_id,
-                            "message": f"Automatically reverted to '{self._physical_sensor_name}' because '{hvac_mode_str}' mode does not support remote sensors",
-                        },
-                        blocking=False,
-                    )
-
-                self.hass.async_create_task(_log_fallback())
+            self.hass.async_create_task(_log_fallback())
 
     @callback
     def _async_handle_real_state_event(self, event) -> None:
@@ -978,18 +980,16 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         )
         if value is not None:
             humidity = self._real_state.attributes.get(ATTR_CURRENT_HUMIDITY)
-            is_uninitialized = humidity == 0 and (
-                (
-                    self.temperature_unit == UnitOfTemperature.FAHRENHEIT
-                    and math.isclose(value, UNINITIALIZED_TEMP_FAHRENHEIT, abs_tol=0.1)
-                )
-                or (
-                    self.temperature_unit == UnitOfTemperature.CELSIUS
-                    and math.isclose(value, UNINITIALIZED_TEMP_CELSIUS, abs_tol=0.1)
-                )
+            is_uninitialized_temp = (
+                self.temperature_unit == UnitOfTemperature.FAHRENHEIT
+                and math.isclose(value, UNINITIALIZED_TEMP_FAHRENHEIT, abs_tol=0.1)
+            ) or (
+                self.temperature_unit == UnitOfTemperature.CELSIUS
+                and math.isclose(value, UNINITIALIZED_TEMP_CELSIUS, abs_tol=0.1)
             )
+            is_below_min = self._min_temp is not None and value < (self._min_temp - 0.1)
 
-            if is_uninitialized:
+            if is_uninitialized_temp or is_below_min:
                 _LOGGER.warning(
                     "Thermostat Proxy (%s): Real thermostat %s reported current temperature %.1f%s (humidity: %s%%); ignoring as uninitialized reading",
                     self.entity_id,
@@ -1246,9 +1246,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
     def available(self) -> bool:
         if not self._real_state:
             return False
-        if self._real_state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
-            return False
-        return True
+        return self._real_state.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -1736,12 +1734,11 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     and self._last_acted_sensor_temp > self._virtual_target_temperature
                 ):
                     return True
-            elif self.hvac_mode == HVACMode.HEAT:
-                if (
-                    sensor_temp >= self._virtual_target_temperature
-                    and self._last_acted_sensor_temp < self._virtual_target_temperature
-                ):
-                    return True
+            elif self.hvac_mode == HVACMode.HEAT and (
+                sensor_temp >= self._virtual_target_temperature
+                and self._last_acted_sensor_temp < self._virtual_target_temperature
+            ):
+                return True
 
         # Dual target check
         if self.is_range_mode:
@@ -2163,13 +2160,19 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             return
 
         pending_tolerance = self._pending_request_tolerance()
-        if desired_real_low is not None and self._has_pending_real_target_request(
-            desired_real_low, pending_tolerance
+        if (
+            desired_real_low is not None
+            and self._has_pending_real_target_request(
+                desired_real_low, pending_tolerance
+            )
+            and (
+                desired_real_high is None
+                or self._has_pending_real_target_request(
+                    desired_real_high, pending_tolerance
+                )
+            )
         ):
-            if desired_real_high is None or self._has_pending_real_target_request(
-                desired_real_high, pending_tolerance
-            ):
-                return
+            return
 
         payload = {ATTR_ENTITY_ID: self._real_entity_id}
         parts = []
