@@ -1,5 +1,7 @@
 """Tests for safety limits, max_sync_offset, and temperature sanitization."""
 
+import pytest
+
 from custom_components.thermostat_proxy.climate import CustomThermostatEntity
 from homeassistant.components.climate import ClimateEntityFeature, HVACMode
 from homeassistant.const import UnitOfTemperature
@@ -172,3 +174,68 @@ def test_format_math_real_adjustment_shows_clamping():
         unit="°F",
     )
     assert msg_clamped == "32.0°F - 0.0°F = 62.5°F"
+
+
+@pytest.mark.asyncio
+async def test_reconnect_32f_zero_humidity_skips_realign(hass):
+    """Test that 32°F / 0% humidity on reconnect aborts realignment without service call."""
+    proxy = create_proxy(hass, real_min_temp=45.0, max_sync_offset=10.0)
+    proxy._virtual_target_temperature = 72.5
+    proxy._sensor_states["sensor.1"] = State("sensor.1", "72.5")
+
+    # Real thermostat reconnects with 32.0°F and 0% humidity
+    proxy._real_state = State(
+        "climate.real",
+        HVACMode.COOL,
+        {
+            "current_temperature": 32.0,
+            "temperature": 72.0,
+            "min_temp": 45.0,
+            "max_temp": 80.0,
+            "current_humidity": 0,
+            "target_temp_step": 1.0,
+            "supported_features": ClimateEntityFeature.TARGET_TEMPERATURE,
+        },
+    )
+
+    await proxy._async_realign_real_target_from_sensor()
+
+    # Must NOT dispatch climate.set_temperature to the physical thermostat
+    assert not hass.services.async_call.called
+
+
+@pytest.mark.asyncio
+async def test_realign_enforces_max_sync_offset_clamp(hass):
+    """Test that realignment strictly clamps physical setpoint within max_sync_offset."""
+    proxy = create_proxy(hass, real_min_temp=45.0, max_sync_offset=10.0)
+    proxy._virtual_target_temperature = 72.5
+    proxy._sensor_states["sensor.1"] = State("sensor.1", "72.5")
+
+    # Real thermostat reports 50.0°F (valid reading, 50% humidity)
+    # Target = 72.5, sensor = 72.5 -> delta = 0.
+    # Calculated real target = 50.0 + 0 = 50.0°F.
+    # Allowed range [62.5, 82.5]. Clamped to 62.5°F, rounded to step 1.0 -> 63.0°F.
+    proxy._real_state = State(
+        "climate.real",
+        HVACMode.COOL,
+        {
+            "current_temperature": 50.0,
+            "temperature": 72.0,
+            "min_temp": 45.0,
+            "max_temp": 80.0,
+            "current_humidity": 50.0,
+            "target_temp_step": 1.0,
+            "supported_features": ClimateEntityFeature.TARGET_TEMPERATURE,
+        },
+    )
+
+    await proxy._async_realign_real_target_from_sensor()
+
+    assert hass.services.async_call.called
+    args, _ = hass.services.async_call.call_args
+    assert args[0] == "climate"
+    assert args[1] == "set_temperature"
+    # Hardware min is 45.0, but max_sync_offset ensures it is clamped near 62.5 (62.0 with step 1.0), NEVER 50.0 or 45.0!
+    assert args[2]["temperature"] in (62.0, 63.0)
+    assert abs(args[2]["temperature"] - 72.5) <= 10.5
+    assert args[2]["temperature"] not in (50.0, 45.0)
