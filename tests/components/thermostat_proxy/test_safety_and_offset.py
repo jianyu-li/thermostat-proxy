@@ -1,12 +1,9 @@
 """Tests for safety limits, max_sync_offset, and temperature sanitization."""
 
-from unittest.mock import AsyncMock, patch
-import pytest
-
-from homeassistant.core import HomeAssistant, State
+from custom_components.thermostat_proxy.climate import CustomThermostatEntity
 from homeassistant.components.climate import ClimateEntityFeature, HVACMode
 from homeassistant.const import UnitOfTemperature
-from custom_components.thermostat_proxy.climate import CustomThermostatEntity
+from homeassistant.core import State
 
 
 def create_proxy(
