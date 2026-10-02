@@ -125,7 +125,7 @@ async def test_external_change_real_flow(hass: HomeAssistant, mode: str) -> None
     assert real_state.attributes["temperature"] == 22.0
 
     # Advance the write time back so we are out of the post-write grace period
-    entity._last_real_write_time -= 11.0
+    entity._last_real_write_time -= 46.0
 
     # Simulate external change on real thermostat target: 22.0 -> 21.0 (-1.0 degree)
     hass.states.async_set(

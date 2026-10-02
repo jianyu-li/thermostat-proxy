@@ -38,12 +38,14 @@ The project follows the standard Home Assistant custom component structure:
 
 ## Build, Test, and Development Commands
 
-1. `python3 -m venv .venv && source .venv/bin/activate` — Create an isolated environment.
-2. `pip install -r requirements_test.txt` — Install Home Assistant and linting tools.
-3. `ruff check custom_components/thermostat_proxy` — Static analysis aligned with HA guidance.
-4. `black custom_components/thermostat_proxy` — Enforce 88-character formatting.
-5. `codespell custom_components/thermostat_proxy README.md` — Catch typos.
-6. `hass --script check_config -c /path/to/ha-config` — Validate component configuration.
+> [!IMPORTANT]
+> **Do NOT create or run virtual environments on mounted or external drives.** Always use the dedicated local virtual environment at `~/.thermostat_proxy_venv` for running tests and tooling to avoid external filesystem latency, file locking, and dependency/wheel incompatibilities.
+
+1. `PYTHONPATH=$PWD ~/.thermostat_proxy_venv/bin/pytest tests/ -v -W error::RuntimeWarning` — Run the full test suite.
+2. `uvx ruff check custom_components/thermostat_proxy` (or `~/.thermostat_proxy_venv/bin/ruff check custom_components/thermostat_proxy`) — Static analysis aligned with HA guidance.
+3. `uvx black custom_components/thermostat_proxy` (or `~/.thermostat_proxy_venv/bin/black custom_components/thermostat_proxy`) — Enforce 88-character formatting.
+4. `codespell custom_components/thermostat_proxy README.md` — Catch typos.
+5. `hass --script check_config -c /path/to/ha-config` — Validate component configuration.
 
 ### Prerequisites
 

@@ -30,6 +30,8 @@ A Home Assistant custom integration that lets you expose a virtual `climate` ent
 - **Hardware-Accurate Control Resolution**: Automatically detects the exact precision of your physical thermostat (e.g., 0.5°) and preserves it when setting target temperatures, regardless of whether your selected remote sensor reports coarse, whole-degree values.
 - **Sensor Change Threshold**: Configurable `sensor_change_threshold` (e.g. 0.5°) to prevent equipment short-cycling by filtering minor sensor fluctuations, while always overriding the threshold when the remote sensor reaches or crosses the target temperature.
 - Default sensor selector includes a "Last active sensor" option (during setup or in options) so the proxy resumes with the most recently selected sensor instead of the configured default.
+- **Humidity Sensor Pairing**: Optionally bind a humidity sensor to any preset. When that preset is active, `current_humidity` reads from the paired humidity sensor. If a paired humidity sensor is unavailable/offline or if a preset has no paired humidity sensor, `current_humidity` seamlessly falls back to the physical thermostat's built-in humidity reading.
+- **Humidity Overdrive**: When the active preset has a paired humidity sensor and the current humidity exceeds the target, the proxy can overcool (lower the cooling setpoint) to run the compressor for dehumidification, even when the temperature target is already met. A configurable `max_humidity_overcool` limit prevents excessive cooling.
 
 ## Configuration
 
@@ -45,11 +47,14 @@ A Home Assistant custom integration that lets you expose a virtual `climate` ent
 | `max_sync_offset` | No | `10.0` (Disabled via 0) | **Maximum Sync Offset**: Circuit breaker to prevent wild sensor readings. Limits how far the physical thermostat target can drift from the virtual target. |
 | `disable_auto_switch` | No | `False` | **Disable Auto-Switch**: When turned on, the proxy will maintain the active remote sensor and its offset when a manual change is made directly on the physical thermostat, instead of automatically falling back to the physical preset. |
 | `sensor_change_threshold` | No | `0.0` (Disabled) | **Sensor Change Threshold**: Minimum temperature change (in degrees) required on the active remote sensor before pushing a setpoint adjustment to the physical thermostat. Prevents short-cycling while ensuring target crossings immediately trigger adjustments. |
+| `max_humidity_overcool` | No | `2.0` | **Maximum Dehumidification Overcool**: Maximum degrees the proxy is allowed to lower the cooling setpoint below the temperature target for dehumidification. Set to 0 to disable humidity overdrive entirely. |
+| `default_target_humidity` | No | `50` | **Default Target Humidity (%)**: The initial target humidity percentage used when no previous value has been restored. Adjustable at runtime via `climate.set_humidity`. |
 
 ## How It Works
 
 - `current_temperature` reflects the selected sensor. If its state is `unknown`/`unavailable`, the entity reports the real thermostat’s own temperature.
-- `preset_modes` is populated with the configured sensor names. Calling `climate.set_preset_mode` switches the sensor.
+- `current_humidity` reflects the active preset's paired humidity sensor. If the paired humidity sensor is `unknown`/`unavailable` or unconfigured, the entity falls back to the real thermostat's own humidity reading.
+- `preset_modes` is populated with the configured sensor names. Calling `climate.set_preset_mode` switches the sensor. Switching presets requires the target preset's temperature sensor to be available; if an optional paired humidity sensor is offline, the preset can still be activated and humidity will fall back to the physical thermostat.
 - When you call `climate.set_temperature` on the custom entity, it calculates `delta = requested_temp - displayed_current_temp` and then sets the real thermostat to `real_current_temp + delta`. A two-degree increase relative to the virtual sensor becomes a two-degree increase on the physical thermostat, for example.
 - **Overdrive**: If the virtual target is not met (e.g., set to 70, sensor reads 69), but the physical thermostat (satisfied at its own location) goes Idle, the integration detects this "Stall". It then applies a +1° (or -1° for cooling) "Overdrive" offset to the physical thermostat's target to force it to run. This offset sticks until the virtual target is met or the system is no longer stalled.
 - **Safety Clamping**: Calculated targets are first restricted by `max_sync_offset` to prevent wild deviations (clamping them within ±`max_sync_offset` of the virtual target), then clamped to user-configured `min_temp` and `max_temp` safety limits (if set), and finally constrained to the physical thermostat's `min_temp`, `max_temp`, and `target_temp_step`. This multi-layer protection prevents extreme values from sensor anomalies. Configuring explicit safety limits is useful for certain thermostats that enforce additional operational restrictions not exposed through their Home Assistant attributes.
@@ -142,7 +147,8 @@ mode: single
 - By default, manual changes made directly on the physical thermostat will switch the proxy to the physical preset and align the virtual target with the real set point while recording a logbook entry. Use "Disable auto-switch to physical sensor" to keep the remote sensor active.
 - **Disable built-in Comfort/Eco/Schedule modes**: Disable any comfort modes, eco modes, follow me, or schedules configured directly on the physical thermostat (or via its proprietary app/integration). Because these modes change the target temperature setpoints outside of this integration, they will cause the proxy to detect a manual change and automatically fall back to the `Physical Entity` preset.
 - If you pick a specific default sensor instead of "Last active sensor", the proxy will fall back to that default after a restart even if you had switched to a different preset earlier.
-- This integration does not use humidity data for its core logic (e.g., temperature control), but it does expose the underlying thermostat's humidity reading as a real_current_humidity attribute for visibility.
+- **Humidity Fallback & Preset Switching**: Switching presets requires the target preset's temperature sensor to be online and valid. If only the optional paired humidity sensor is offline, preset activation succeeds, and `current_humidity` falls back to the physical thermostat's internal reading.
+- **Humidity Overdrive** engages only when the active preset has a paired remote humidity sensor (all-or-nothing rule). The proxy will not trigger humidity overdrive using only the physical thermostat's built-in humidity reading for a preset that lacks an explicit humidity binding.
 
 
 ## Contributing

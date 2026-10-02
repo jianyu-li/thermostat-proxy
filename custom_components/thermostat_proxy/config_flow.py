@@ -13,28 +13,33 @@ from homeassistant.helpers import config_validation as cv, selector
 from homeassistant.util import slugify
 
 from .const import (
+    CONF_COOLDOWN_PERIOD,
     CONF_DEFAULT_SENSOR,
+    CONF_DEFAULT_TARGET_HUMIDITY,
+    CONF_DISABLE_AUTO_SWITCH,
+    CONF_MAX_HUMIDITY_OVERCOOL,
+    CONF_MAX_SYNC_OFFSET,
+    CONF_MAX_TEMP,
+    CONF_MIN_TEMP,
     CONF_PHYSICAL_SENSOR_NAME,
+    CONF_SENSOR_CHANGE_THRESHOLD,
     CONF_SENSOR_ENTITY_ID,
+    CONF_SENSOR_HUMIDITY_ENTITY_ID,
     CONF_SENSOR_NAME,
     CONF_SENSORS,
-    DEFAULT_SENSOR_LAST_ACTIVE,
     CONF_THERMOSTAT,
     CONF_UNIQUE_ID,
     CONF_USE_LAST_ACTIVE_SENSOR,
+    DEFAULT_COOLDOWN_PERIOD,
+    DEFAULT_DISABLE_AUTO_SWITCH,
+    DEFAULT_MAX_HUMIDITY_OVERCOOL,
+    DEFAULT_MAX_SYNC_OFFSET,
     DEFAULT_NAME,
+    DEFAULT_SENSOR_CHANGE_THRESHOLD,
+    DEFAULT_SENSOR_LAST_ACTIVE,
+    DEFAULT_TARGET_HUMIDITY,
     DOMAIN,
     PHYSICAL_SENSOR_NAME,
-    CONF_COOLDOWN_PERIOD,
-    DEFAULT_COOLDOWN_PERIOD,
-    CONF_MIN_TEMP,
-    CONF_MAX_TEMP,
-    CONF_MAX_SYNC_OFFSET,
-    DEFAULT_MAX_SYNC_OFFSET,
-    CONF_DISABLE_AUTO_SWITCH,
-    DEFAULT_DISABLE_AUTO_SWITCH,
-    CONF_SENSOR_CHANGE_THRESHOLD,
-    DEFAULT_SENSOR_CHANGE_THRESHOLD,
 )
 
 SENSOR_STEP = "sensors"
@@ -78,6 +83,8 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._max_sync_offset: float | None = None
         self._disable_auto_switch: bool = DEFAULT_DISABLE_AUTO_SWITCH
         self._sensor_change_threshold: float = DEFAULT_SENSOR_CHANGE_THRESHOLD
+        self._max_humidity_overcool: float = DEFAULT_MAX_HUMIDITY_OVERCOOL
+        self._default_target_humidity: int = DEFAULT_TARGET_HUMIDITY
         self._reconfigure_entry: config_entries.ConfigEntry | None = None
         self._replace_target: str | None = None
 
@@ -135,6 +142,9 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             {
                 CONF_SENSOR_NAME: sensor[CONF_SENSOR_NAME],
                 CONF_SENSOR_ENTITY_ID: sensor[CONF_SENSOR_ENTITY_ID],
+                CONF_SENSOR_HUMIDITY_ENTITY_ID: sensor.get(
+                    CONF_SENSOR_HUMIDITY_ENTITY_ID
+                ),
             }
             for sensor in entry.data.get(CONF_SENSORS, [])
         ]
@@ -153,6 +163,12 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
         self._sensor_change_threshold = entry.data.get(
             CONF_SENSOR_CHANGE_THRESHOLD, DEFAULT_SENSOR_CHANGE_THRESHOLD
+        )
+        self._max_humidity_overcool = entry.data.get(
+            CONF_MAX_HUMIDITY_OVERCOOL, DEFAULT_MAX_HUMIDITY_OVERCOOL
+        )
+        self._default_target_humidity = entry.data.get(
+            CONF_DEFAULT_TARGET_HUMIDITY, DEFAULT_TARGET_HUMIDITY
         )
         self._use_last_active_sensor = entry.data.get(
             CONF_USE_LAST_ACTIVE_SENSOR, False
@@ -238,6 +254,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             sensor_name = user_input[CONF_SENSOR_NAME].strip()
             entity_id = user_input[CONF_SENSOR_ENTITY_ID]
+            humidity_entity_id = user_input.get(CONF_SENSOR_HUMIDITY_ENTITY_ID)
 
             reserved_names = {
                 PHYSICAL_SENSOR_NAME.lower(),
@@ -251,6 +268,12 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "duplicate_sensor_name"
             elif any(
                 entity_id == sensor[CONF_SENSOR_ENTITY_ID] for sensor in self._sensors
+            ) or (
+                humidity_entity_id
+                and any(
+                    humidity_entity_id == sensor.get(CONF_SENSOR_HUMIDITY_ENTITY_ID)
+                    for sensor in self._sensors
+                )
             ):
                 errors["base"] = "duplicate_sensor_entity"
             else:
@@ -258,6 +281,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     {
                         CONF_SENSOR_NAME: sensor_name,
                         CONF_SENSOR_ENTITY_ID: entity_id,
+                        CONF_SENSOR_HUMIDITY_ENTITY_ID: humidity_entity_id,
                     }
                 )
                 if user_input.get(CONF_ADD_ANOTHER, False):
@@ -273,6 +297,12 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     selector.EntitySelectorConfig(
                         domain=["sensor", "climate", "number"],
                         device_class="temperature",
+                    )
+                ),
+                vol.Optional(CONF_SENSOR_HUMIDITY_ENTITY_ID): selector.EntitySelector(
+                    selector.EntitySelectorConfig(
+                        domain=["sensor"],
+                        device_class="humidity",
                     )
                 ),
                 vol.Optional(CONF_ADD_ANOTHER, default=True): cv.boolean,
@@ -364,6 +394,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             sensor_name = user_input[CONF_SENSOR_NAME].strip()
             entity_id = user_input[CONF_SENSOR_ENTITY_ID]
+            humidity_entity_id = user_input.get(CONF_SENSOR_HUMIDITY_ENTITY_ID)
 
             reserved_names = {
                 PHYSICAL_SENSOR_NAME.lower(),
@@ -381,34 +412,64 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 entity_id == sensor[CONF_SENSOR_ENTITY_ID]
                 for sensor in self._sensors
                 if sensor[CONF_SENSOR_NAME] != target
+            ) or (
+                humidity_entity_id
+                and any(
+                    humidity_entity_id == sensor.get(CONF_SENSOR_HUMIDITY_ENTITY_ID)
+                    for sensor in self._sensors
+                    if sensor[CONF_SENSOR_NAME] != target
+                )
             ):
                 errors["base"] = "duplicate_sensor_entity"
             else:
                 target_sensor[CONF_SENSOR_NAME] = sensor_name
                 target_sensor[CONF_SENSOR_ENTITY_ID] = entity_id
+                target_sensor[CONF_SENSOR_HUMIDITY_ENTITY_ID] = humidity_entity_id
                 if self._default_sensor == target:
                     self._default_sensor = sensor_name
                 self._replace_target = None
                 return await self.async_step_manage_sensors()
 
-        data_schema = vol.Schema(
-            {
-                vol.Required(
-                    CONF_SENSOR_NAME, default=target_sensor[CONF_SENSOR_NAME]
-                ): selector.TextSelector(
-                    selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
-                ),
-                vol.Required(
-                    CONF_SENSOR_ENTITY_ID,
-                    default=target_sensor[CONF_SENSOR_ENTITY_ID],
-                ): selector.EntitySelector(
+        schema_dict: dict[Any, Any] = {
+            vol.Required(
+                CONF_SENSOR_NAME, default=target_sensor[CONF_SENSOR_NAME]
+            ): selector.TextSelector(
+                selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
+            ),
+            vol.Required(
+                CONF_SENSOR_ENTITY_ID,
+                default=target_sensor[CONF_SENSOR_ENTITY_ID],
+            ): selector.EntitySelector(
+                selector.EntitySelectorConfig(
+                    domain=["sensor", "climate", "number"],
+                    device_class="temperature",
+                )
+            ),
+        }
+        current_humidity = target_sensor.get(CONF_SENSOR_HUMIDITY_ENTITY_ID)
+        if current_humidity:
+            schema_dict[
+                vol.Optional(
+                    CONF_SENSOR_HUMIDITY_ENTITY_ID,
+                    default=current_humidity,
+                )
+            ] = selector.EntitySelector(
+                selector.EntitySelectorConfig(
+                    domain=["sensor"],
+                    device_class="humidity",
+                )
+            )
+        else:
+            schema_dict[vol.Optional(CONF_SENSOR_HUMIDITY_ENTITY_ID)] = (
+                selector.EntitySelector(
                     selector.EntitySelectorConfig(
-                        domain=["sensor", "climate", "number"],
-                        device_class="temperature",
+                        domain=["sensor"],
+                        device_class="humidity",
                     )
-                ),
-            }
-        )
+                )
+            )
+
+        data_schema = vol.Schema(schema_dict)
 
         return self.async_show_form(
             step_id="replace_sensor_details",
@@ -457,6 +518,18 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 if user_input.get(CONF_SENSOR_CHANGE_THRESHOLD) is not None
                 else DEFAULT_SENSOR_CHANGE_THRESHOLD
             )
+            max_humidity_overcool = (
+                user_input.get(
+                    CONF_MAX_HUMIDITY_OVERCOOL, DEFAULT_MAX_HUMIDITY_OVERCOOL
+                )
+                if user_input.get(CONF_MAX_HUMIDITY_OVERCOOL) is not None
+                else DEFAULT_MAX_HUMIDITY_OVERCOOL
+            )
+            default_target_humidity = (
+                user_input.get(CONF_DEFAULT_TARGET_HUMIDITY, DEFAULT_TARGET_HUMIDITY)
+                if user_input.get(CONF_DEFAULT_TARGET_HUMIDITY) is not None
+                else DEFAULT_TARGET_HUMIDITY
+            )
 
             if any(
                 physical_sensor_name.lower() == sensor_name.lower()
@@ -489,6 +562,8 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._max_sync_offset = max_sync_offset
                 self._disable_auto_switch = disable_auto_switch
                 self._sensor_change_threshold = sensor_change_threshold
+                self._max_humidity_overcool = max_humidity_overcool
+                self._default_target_humidity = default_target_humidity
                 self._use_last_active_sensor = use_last_active_sensor
 
                 sensor_names_with_physical = list(sensor_names)
@@ -506,6 +581,8 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_MAX_SYNC_OFFSET: max_sync_offset,
                     CONF_DISABLE_AUTO_SWITCH: disable_auto_switch,
                     CONF_SENSOR_CHANGE_THRESHOLD: sensor_change_threshold,
+                    CONF_MAX_HUMIDITY_OVERCOOL: max_humidity_overcool,
+                    CONF_DEFAULT_TARGET_HUMIDITY: default_target_humidity,
                 }
                 if self._use_last_active_sensor:
                     data[CONF_DEFAULT_SENSOR] = DEFAULT_SENSOR_LAST_ACTIVE
@@ -523,6 +600,8 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_DISABLE_AUTO_SWITCH,
                         CONF_SENSOR_CHANGE_THRESHOLD,
                         CONF_USE_LAST_ACTIVE_SENSOR,
+                        CONF_MAX_HUMIDITY_OVERCOOL,
+                        CONF_DEFAULT_TARGET_HUMIDITY,
                     ):
                         if key in options:
                             options[key] = data.get(key)
@@ -618,6 +697,34 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         schema_fields[
             vol.Optional(CONF_DISABLE_AUTO_SWITCH, default=self._disable_auto_switch)
         ] = selector.BooleanSelector()
+        schema_fields[
+            vol.Optional(
+                CONF_MAX_HUMIDITY_OVERCOOL,
+                default=(
+                    self._max_humidity_overcool
+                    if self._max_humidity_overcool is not None
+                    else DEFAULT_MAX_HUMIDITY_OVERCOOL
+                ),
+            )
+        ] = selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                min=0.0, max=10.0, step=0.5, mode=selector.NumberSelectorMode.BOX
+            )
+        )
+        schema_fields[
+            vol.Optional(
+                CONF_DEFAULT_TARGET_HUMIDITY,
+                default=(
+                    self._default_target_humidity
+                    if self._default_target_humidity is not None
+                    else DEFAULT_TARGET_HUMIDITY
+                ),
+            )
+        ] = selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                min=30, max=99, step=1, mode=selector.NumberSelectorMode.BOX
+            )
+        )
 
         data_schema = vol.Schema(schema_fields)
 
@@ -702,6 +809,18 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
                 CONF_SENSOR_CHANGE_THRESHOLD, DEFAULT_SENSOR_CHANGE_THRESHOLD
             ),
         )
+        current_max_humidity_overcool = self.config_entry.options.get(
+            CONF_MAX_HUMIDITY_OVERCOOL,
+            self.config_entry.data.get(
+                CONF_MAX_HUMIDITY_OVERCOOL, DEFAULT_MAX_HUMIDITY_OVERCOOL
+            ),
+        )
+        current_default_target_humidity = self.config_entry.options.get(
+            CONF_DEFAULT_TARGET_HUMIDITY,
+            self.config_entry.data.get(
+                CONF_DEFAULT_TARGET_HUMIDITY, DEFAULT_TARGET_HUMIDITY
+            ),
+        )
 
         if current_default == DEFAULT_SENSOR_LAST_ACTIVE:
             use_last_active_sensor = True
@@ -722,6 +841,18 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
                 )
                 if user_input.get(CONF_SENSOR_CHANGE_THRESHOLD) is not None
                 else DEFAULT_SENSOR_CHANGE_THRESHOLD
+            )
+            max_humidity_overcool = (
+                user_input.get(
+                    CONF_MAX_HUMIDITY_OVERCOOL, DEFAULT_MAX_HUMIDITY_OVERCOOL
+                )
+                if user_input.get(CONF_MAX_HUMIDITY_OVERCOOL) is not None
+                else DEFAULT_MAX_HUMIDITY_OVERCOOL
+            )
+            default_target_humidity = (
+                user_input.get(CONF_DEFAULT_TARGET_HUMIDITY, DEFAULT_TARGET_HUMIDITY)
+                if user_input.get(CONF_DEFAULT_TARGET_HUMIDITY) is not None
+                else DEFAULT_TARGET_HUMIDITY
             )
 
             if default_sensor and default_sensor not in (
@@ -749,6 +880,8 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
                 data[CONF_MAX_SYNC_OFFSET] = max_sync_offset
                 data[CONF_DISABLE_AUTO_SWITCH] = disable_auto_switch
                 data[CONF_SENSOR_CHANGE_THRESHOLD] = sensor_change_threshold
+                data[CONF_MAX_HUMIDITY_OVERCOOL] = max_humidity_overcool
+                data[CONF_DEFAULT_TARGET_HUMIDITY] = default_target_humidity
 
                 return self.async_create_entry(title="", data=data)
 
@@ -827,6 +960,26 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
         schema_fields[
             vol.Optional(CONF_DISABLE_AUTO_SWITCH, default=current_disable_auto_switch)
         ] = selector.BooleanSelector()
+        schema_fields[
+            vol.Optional(
+                CONF_MAX_HUMIDITY_OVERCOOL,
+                default=current_max_humidity_overcool,
+            )
+        ] = selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                min=0.0, max=10.0, step=0.5, mode=selector.NumberSelectorMode.BOX
+            )
+        )
+        schema_fields[
+            vol.Optional(
+                CONF_DEFAULT_TARGET_HUMIDITY,
+                default=current_default_target_humidity,
+            )
+        ] = selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                min=30, max=99, step=1, mode=selector.NumberSelectorMode.BOX
+            )
+        )
 
         data_schema = vol.Schema(schema_fields)
 

@@ -46,6 +46,7 @@
         "data": {
           "name": "Sensor name",
           "entity_id": "Temperature entity",
+          "humidity_entity_id": "Humidity entity (optional)",
           "add_another": "Add another sensor"
         }
       },
@@ -75,7 +76,8 @@
         "description": "Update the name and temperature entity for this sensor.",
         "data": {
           "name": "Sensor name",
-          "entity_id": "Temperature entity"
+          "entity_id": "Temperature entity",
+          "humidity_entity_id": "Humidity entity (optional)"
         }
       },
       "finalize": {
@@ -89,7 +91,9 @@
           "max_temp": "Maximum safe temperature limit (set to 0 to disable)",
           "max_sync_offset": "Maximum allowed offset from target temperature (0 to disable, default 10.0)",
           "disable_auto_switch": "Disable auto-switch to physical sensor",
-          "sensor_change_threshold": "Sensor change threshold (degrees before updating physical thermostat, 0 to disable, default 0.0)"
+          "sensor_change_threshold": "Sensor change threshold (degrees before updating physical thermostat, 0 to disable, default 0.0)",
+          "max_humidity_overcool": "Maximum cooling degrees allowed for dehumidification (0 to disable, default 2.0)",
+          "default_target_humidity": "Default target humidity (%)"
         }
       }
     },
@@ -119,7 +123,9 @@
           "max_temp": "Maximum safe temperature limit (set to 0 to disable)",
           "max_sync_offset": "Maximum allowed offset from target temperature (0 to disable, default 10.0)",
           "disable_auto_switch": "Disable auto-switch to physical sensor",
-          "sensor_change_threshold": "Sensor change threshold (degrees before updating physical thermostat, 0 to disable, default 0.0)"
+          "sensor_change_threshold": "Sensor change threshold (degrees before updating physical thermostat, 0 to disable, default 0.0)",
+          "max_humidity_overcool": "Maximum cooling degrees allowed for dehumidification (0 to disable, default 2.0)",
+          "default_target_humidity": "Default target humidity (%)"
         }
       }
     },
