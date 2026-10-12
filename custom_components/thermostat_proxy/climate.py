@@ -75,6 +75,7 @@ from .const import (
     CONF_MIN_DUAL_TEMP_SPREAD,
     CONF_MIN_TEMP,
     CONF_PHYSICAL_SENSOR_NAME,
+    CONF_PRESERVE_VIRTUAL_TARGET,
     CONF_SENSOR_CHANGE_THRESHOLD,
     CONF_SENSOR_ENTITY_ID,
     CONF_SENSOR_HUMIDITY_ENTITY_ID,
@@ -91,6 +92,7 @@ from .const import (
     DEFAULT_MIN_DUAL_TEMP_SPREAD_CELSIUS,
     DEFAULT_MIN_DUAL_TEMP_SPREAD_FAHRENHEIT,
     DEFAULT_NAME,
+    DEFAULT_PRESERVE_VIRTUAL_TARGET,
     DEFAULT_SENSOR_CHANGE_THRESHOLD,
     DEFAULT_SENSOR_LAST_ACTIVE,
     DEFAULT_TARGET_HUMIDITY,
@@ -185,6 +187,9 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
             CONF_DISABLE_AUTO_SWITCH, default=DEFAULT_DISABLE_AUTO_SWITCH
         ): cv.boolean,
         vol.Optional(
+            CONF_PRESERVE_VIRTUAL_TARGET, default=DEFAULT_PRESERVE_VIRTUAL_TARGET
+        ): cv.boolean,
+        vol.Optional(
             CONF_SENSOR_CHANGE_THRESHOLD, default=DEFAULT_SENSOR_CHANGE_THRESHOLD
         ): vol.Coerce(float),
         vol.Optional(CONF_MIN_DUAL_TEMP_SPREAD): vol.Coerce(float),
@@ -227,6 +232,9 @@ async def async_setup_platform(
                 max_sync_offset=config.get(CONF_MAX_SYNC_OFFSET),
                 disable_auto_switch=config.get(
                     CONF_DISABLE_AUTO_SWITCH, DEFAULT_DISABLE_AUTO_SWITCH
+                ),
+                preserve_virtual_target=config.get(
+                    CONF_PRESERVE_VIRTUAL_TARGET, DEFAULT_PRESERVE_VIRTUAL_TARGET
                 ),
                 sensor_change_threshold=config.get(
                     CONF_SENSOR_CHANGE_THRESHOLD, DEFAULT_SENSOR_CHANGE_THRESHOLD
@@ -307,6 +315,10 @@ async def async_setup_entry(
         CONF_MIN_DUAL_TEMP_SPREAD,
         data.get(CONF_MIN_DUAL_TEMP_SPREAD),
     )
+    preserve_virtual_target = entry.options.get(
+        CONF_PRESERVE_VIRTUAL_TARGET,
+        data.get(CONF_PRESERVE_VIRTUAL_TARGET, DEFAULT_PRESERVE_VIRTUAL_TARGET),
+    )
 
     if raw_default_sensor == DEFAULT_SENSOR_LAST_ACTIVE:
         use_last_active_sensor = True
@@ -338,6 +350,7 @@ async def async_setup_entry(
                 user_max_temp=user_max_temp,
                 max_sync_offset=max_sync_offset,
                 disable_auto_switch=disable_auto_switch,
+                preserve_virtual_target=preserve_virtual_target,
                 sensor_change_threshold=sensor_change_threshold,
                 max_humidity_overcool=max_humidity_overcool,
                 default_target_humidity=default_target_humidity,
@@ -378,6 +391,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         user_max_temp: float | None = None,
         max_sync_offset: float | None = None,
         disable_auto_switch: bool = False,
+        preserve_virtual_target: bool = DEFAULT_PRESERVE_VIRTUAL_TARGET,
         sensor_change_threshold: float = DEFAULT_SENSOR_CHANGE_THRESHOLD,
         max_humidity_overcool: float = DEFAULT_MAX_HUMIDITY_OVERCOOL,
         default_target_humidity: int = DEFAULT_TARGET_HUMIDITY,
@@ -442,6 +456,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self._user_max_temp: float | None = user_max_temp
         self._max_sync_offset: float | None = max_sync_offset
         self._disable_auto_switch: bool = disable_auto_switch
+        self._preserve_virtual_target: bool = preserve_virtual_target
         self._sensor_change_threshold: float = float(sensor_change_threshold)
         self._max_humidity_overcool: float = float(max_humidity_overcool)
         self._default_target_humidity: int = int(default_target_humidity)
@@ -874,6 +889,13 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             self._disable_auto_switch
             and self._selected_sensor_name != self._physical_sensor_name
         ):
+            if self._preserve_virtual_target:
+                self._log_debug(
+                    "Ignoring external real target change while preserving the virtual target: %s -> %s",
+                    previous_real_target,
+                    real_target,
+                )
+                return
             if (
                 previous_real_target is not None
                 and self._virtual_target_temperature is not None
@@ -993,6 +1015,11 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             self._disable_auto_switch
             and self._selected_sensor_name != self._physical_sensor_name
         ):
+            if self._preserve_virtual_target:
+                self._log_debug(
+                    "Ignoring external dual target change while preserving the virtual targets"
+                )
+                return
             if low_changed and previous_low is not None and real_low is not None:
                 delta = real_low - previous_low
                 if self._virtual_target_temperature_low is not None:
