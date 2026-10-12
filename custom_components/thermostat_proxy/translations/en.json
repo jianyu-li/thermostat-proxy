@@ -22,6 +22,15 @@
       }
     }
   },
+  "selector": {
+    "physical_target_change_behavior": {
+      "options": {
+        "auto_switch": "Auto-switch to physical sensor",
+        "disable_auto_switch": "Disable auto-switch to physical sensor",
+        "preserve_virtual_target": "Disable auto-switch to physical sensor and prevent physical target changes from overriding the virtual target"
+      }
+    }
+  },
   "config": {
     "step": {
       "user": {
@@ -91,9 +100,10 @@
           "max_temp": "Maximum safe temperature limit (set to 0 to disable)",
           "max_sync_offset": "Maximum allowed offset from target temperature (0 to disable, default 10.0)",
           "disable_auto_switch": "Disable auto-switch to physical sensor",
-          "sensor_change_threshold": "Sensor change threshold (degrees before updating physical thermostat, 0 to disable, default 0.0)",
           "max_humidity_overcool": "Maximum cooling degrees allowed for dehumidification (0 to disable, default 2.0)",
-          "default_target_humidity": "Default target humidity (%)"
+          "default_target_humidity": "Default target humidity (%)",
+          "physical_target_change_behavior": "Physical target change behavior",
+          "sensor_change_threshold": "Sensor change threshold (degrees before updating physical thermostat, 0 to disable, default 0.0)"
         }
       }
     },
@@ -123,9 +133,10 @@
           "max_temp": "Maximum safe temperature limit (set to 0 to disable)",
           "max_sync_offset": "Maximum allowed offset from target temperature (0 to disable, default 10.0)",
           "disable_auto_switch": "Disable auto-switch to physical sensor",
-          "sensor_change_threshold": "Sensor change threshold (degrees before updating physical thermostat, 0 to disable, default 0.0)",
           "max_humidity_overcool": "Maximum cooling degrees allowed for dehumidification (0 to disable, default 2.0)",
-          "default_target_humidity": "Default target humidity (%)"
+          "default_target_humidity": "Default target humidity (%)",
+          "physical_target_change_behavior": "Physical target change behavior",
+          "sensor_change_threshold": "Sensor change threshold (degrees before updating physical thermostat, 0 to disable, default 0.0)"
         }
       }
     },

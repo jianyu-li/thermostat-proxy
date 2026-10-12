@@ -11,6 +11,7 @@ from custom_components.thermostat_proxy.const import (
     CONF_THERMOSTAT,
     CONF_SENSORS,
     CONF_DISABLE_AUTO_SWITCH,
+    CONF_PRESERVE_VIRTUAL_TARGET,
 )
 
 
@@ -55,6 +56,7 @@ async def test_async_setup_entry_wiring(hass: HomeAssistant) -> None:
         },
         options={
             CONF_DISABLE_AUTO_SWITCH: True,
+            CONF_PRESERVE_VIRTUAL_TARGET: True,
         },
         source="user",
         unique_id="proxy",
@@ -74,6 +76,7 @@ async def test_async_setup_entry_wiring(hass: HomeAssistant) -> None:
 
     if entity is not None:
         assert getattr(entity, "_disable_auto_switch", False) is True
+        assert getattr(entity, "_preserve_virtual_target", False) is True
 
 
 @pytest.mark.parametrize("mode", ["heat", "cool"])
