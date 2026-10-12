@@ -20,6 +20,7 @@ from .const import (
     CONF_MAX_HUMIDITY_OVERCOOL,
     CONF_MAX_SYNC_OFFSET,
     CONF_MAX_TEMP,
+    CONF_MIN_DUAL_TEMP_SPREAD,
     CONF_MIN_TEMP,
     CONF_PHYSICAL_SENSOR_NAME,
     CONF_SENSOR_CHANGE_THRESHOLD,
@@ -85,6 +86,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._sensor_change_threshold: float = DEFAULT_SENSOR_CHANGE_THRESHOLD
         self._max_humidity_overcool: float = DEFAULT_MAX_HUMIDITY_OVERCOOL
         self._default_target_humidity: int = DEFAULT_TARGET_HUMIDITY
+        self._min_dual_temp_spread: float | None = None
         self._reconfigure_entry: config_entries.ConfigEntry | None = None
         self._replace_target: str | None = None
 
@@ -170,6 +172,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._default_target_humidity = entry.data.get(
             CONF_DEFAULT_TARGET_HUMIDITY, DEFAULT_TARGET_HUMIDITY
         )
+        self._min_dual_temp_spread = entry.data.get(CONF_MIN_DUAL_TEMP_SPREAD)
         self._use_last_active_sensor = entry.data.get(
             CONF_USE_LAST_ACTIVE_SENSOR, False
         )
@@ -530,6 +533,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 if user_input.get(CONF_DEFAULT_TARGET_HUMIDITY) is not None
                 else DEFAULT_TARGET_HUMIDITY
             )
+            min_dual_temp_spread = user_input.get(CONF_MIN_DUAL_TEMP_SPREAD) or None
 
             if any(
                 physical_sensor_name.lower() == sensor_name.lower()
@@ -564,6 +568,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._sensor_change_threshold = sensor_change_threshold
                 self._max_humidity_overcool = max_humidity_overcool
                 self._default_target_humidity = default_target_humidity
+                self._min_dual_temp_spread = min_dual_temp_spread
                 self._use_last_active_sensor = use_last_active_sensor
 
                 sensor_names_with_physical = list(sensor_names)
@@ -583,6 +588,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_SENSOR_CHANGE_THRESHOLD: sensor_change_threshold,
                     CONF_MAX_HUMIDITY_OVERCOOL: max_humidity_overcool,
                     CONF_DEFAULT_TARGET_HUMIDITY: default_target_humidity,
+                    CONF_MIN_DUAL_TEMP_SPREAD: min_dual_temp_spread,
                 }
                 if self._use_last_active_sensor:
                     data[CONF_DEFAULT_SENSOR] = DEFAULT_SENSOR_LAST_ACTIVE
@@ -725,6 +731,20 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 min=30, max=99, step=1, mode=selector.NumberSelectorMode.BOX
             )
         )
+        schema_fields[
+            vol.Optional(
+                CONF_MIN_DUAL_TEMP_SPREAD,
+                default=(
+                    self._min_dual_temp_spread
+                    if self._min_dual_temp_spread is not None
+                    else 0.0
+                ),
+            )
+        ] = selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                min=0.0, max=15.0, step=0.5, mode=selector.NumberSelectorMode.BOX
+            )
+        )
 
         data_schema = vol.Schema(schema_fields)
 
@@ -821,6 +841,10 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
                 CONF_DEFAULT_TARGET_HUMIDITY, DEFAULT_TARGET_HUMIDITY
             ),
         )
+        current_min_dual_temp_spread = self.config_entry.options.get(
+            CONF_MIN_DUAL_TEMP_SPREAD,
+            self.config_entry.data.get(CONF_MIN_DUAL_TEMP_SPREAD),
+        )
 
         if current_default == DEFAULT_SENSOR_LAST_ACTIVE:
             use_last_active_sensor = True
@@ -882,6 +906,9 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
                 data[CONF_SENSOR_CHANGE_THRESHOLD] = sensor_change_threshold
                 data[CONF_MAX_HUMIDITY_OVERCOOL] = max_humidity_overcool
                 data[CONF_DEFAULT_TARGET_HUMIDITY] = default_target_humidity
+                data[CONF_MIN_DUAL_TEMP_SPREAD] = (
+                    user_input.get(CONF_MIN_DUAL_TEMP_SPREAD) or None
+                )
 
                 return self.async_create_entry(title="", data=data)
 
@@ -978,6 +1005,20 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
         ] = selector.NumberSelector(
             selector.NumberSelectorConfig(
                 min=30, max=99, step=1, mode=selector.NumberSelectorMode.BOX
+            )
+        )
+        schema_fields[
+            vol.Optional(
+                CONF_MIN_DUAL_TEMP_SPREAD,
+                default=(
+                    current_min_dual_temp_spread
+                    if current_min_dual_temp_spread is not None
+                    else 0.0
+                ),
+            )
+        ] = selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                min=0.0, max=15.0, step=0.5, mode=selector.NumberSelectorMode.BOX
             )
         )
 
