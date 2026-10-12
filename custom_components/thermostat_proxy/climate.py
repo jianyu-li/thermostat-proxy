@@ -72,6 +72,7 @@ from .const import (
     CONF_MAX_HUMIDITY_OVERCOOL,
     CONF_MAX_SYNC_OFFSET,
     CONF_MAX_TEMP,
+    CONF_MIN_DUAL_TEMP_SPREAD,
     CONF_MIN_TEMP,
     CONF_PHYSICAL_SENSOR_NAME,
     CONF_PRESERVE_VIRTUAL_TARGET,
@@ -88,6 +89,8 @@ from .const import (
     DEFAULT_HUMIDITY_DEADBAND,
     DEFAULT_MAX_HUMIDITY_OVERCOOL,
     DEFAULT_MAX_SYNC_OFFSET,
+    DEFAULT_MIN_DUAL_TEMP_SPREAD_CELSIUS,
+    DEFAULT_MIN_DUAL_TEMP_SPREAD_FAHRENHEIT,
     DEFAULT_NAME,
     DEFAULT_PRESERVE_VIRTUAL_TARGET,
     DEFAULT_SENSOR_CHANGE_THRESHOLD,
@@ -189,6 +192,7 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
         vol.Optional(
             CONF_SENSOR_CHANGE_THRESHOLD, default=DEFAULT_SENSOR_CHANGE_THRESHOLD
         ): vol.Coerce(float),
+        vol.Optional(CONF_MIN_DUAL_TEMP_SPREAD): vol.Coerce(float),
     }
 )
 
@@ -241,6 +245,7 @@ async def async_setup_platform(
                 default_target_humidity=config.get(
                     CONF_DEFAULT_TARGET_HUMIDITY, DEFAULT_TARGET_HUMIDITY
                 ),
+                min_dual_temp_spread=config.get(CONF_MIN_DUAL_TEMP_SPREAD),
             )
         ]
     )
@@ -306,6 +311,10 @@ async def async_setup_entry(
         CONF_DEFAULT_TARGET_HUMIDITY,
         data.get(CONF_DEFAULT_TARGET_HUMIDITY, DEFAULT_TARGET_HUMIDITY),
     )
+    min_dual_temp_spread = entry.options.get(
+        CONF_MIN_DUAL_TEMP_SPREAD,
+        data.get(CONF_MIN_DUAL_TEMP_SPREAD),
+    )
     preserve_virtual_target = entry.options.get(
         CONF_PRESERVE_VIRTUAL_TARGET,
         data.get(CONF_PRESERVE_VIRTUAL_TARGET, DEFAULT_PRESERVE_VIRTUAL_TARGET),
@@ -345,6 +354,7 @@ async def async_setup_entry(
                 sensor_change_threshold=sensor_change_threshold,
                 max_humidity_overcool=max_humidity_overcool,
                 default_target_humidity=default_target_humidity,
+                min_dual_temp_spread=min_dual_temp_spread,
             )
         ]
     )
@@ -385,6 +395,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         sensor_change_threshold: float = DEFAULT_SENSOR_CHANGE_THRESHOLD,
         max_humidity_overcool: float = DEFAULT_MAX_HUMIDITY_OVERCOOL,
         default_target_humidity: int = DEFAULT_TARGET_HUMIDITY,
+        min_dual_temp_spread: float | None = None,
     ) -> None:
         self.hass = hass
         if isinstance(cooldown_period, (int, float)):
@@ -432,9 +443,9 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self._temperature_unit: str | None = None
         self._real_state: State | None = None
         self._last_requested_real_target: float | None = None
-        self._recent_real_target_requests: list[
-            tuple[float, float]
-        ] = []  # (target, timestamp)
+        self._recent_real_target_requests: list[tuple[float, float]] = (
+            []
+        )  # (target, timestamp)
         self._last_real_target_temp: float | None = None
         self._last_real_target_temp_low: float | None = None
         self._last_real_target_temp_high: float | None = None
@@ -464,6 +475,9 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self._sensor_precisions: dict[str, float] = {}
         self._active_overdrive_heat: bool = False
         self._active_overdrive_cool: bool = False
+        self._min_dual_temp_spread: float | None = (
+            float(min_dual_temp_spread) if min_dual_temp_spread is not None else None
+        )
 
     def _log_debug(self, msg: str, *args: Any) -> None:
         """Log diagnostic information."""
@@ -1182,29 +1196,48 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         return value
 
     def _get_real_target_temperature(self) -> float | None:
-        if not self._real_state:
+        if not self._real_state or self._real_state.state in (
+            STATE_UNAVAILABLE,
+            STATE_UNKNOWN,
+        ):
             self._mark_entity_health(self._real_entity_id, False)
             return None
         value = _coerce_temperature(self._real_state.attributes.get(ATTR_TEMPERATURE))
         if value is None:
-            self._mark_entity_health(self._real_entity_id, False)
+            if (
+                not self.is_range_mode
+                and self._get_real_target_temperature_low() is None
+            ):
+                self._mark_entity_health(self._real_entity_id, False)
         else:
             self._mark_entity_health(self._real_entity_id, True)
         return value
 
     def _get_real_target_temperature_low(self) -> float | None:
-        if not self._real_state:
+        if not self._real_state or self._real_state.state in (
+            STATE_UNAVAILABLE,
+            STATE_UNKNOWN,
+        ):
             return None
-        return _coerce_temperature(
+        value = _coerce_temperature(
             self._real_state.attributes.get(ATTR_TARGET_TEMP_LOW)
         )
+        if value is not None:
+            self._mark_entity_health(self._real_entity_id, True)
+        return value
 
     def _get_real_target_temperature_high(self) -> float | None:
-        if not self._real_state:
+        if not self._real_state or self._real_state.state in (
+            STATE_UNAVAILABLE,
+            STATE_UNKNOWN,
+        ):
             return None
-        return _coerce_temperature(
+        value = _coerce_temperature(
             self._real_state.attributes.get(ATTR_TARGET_TEMP_HIGH)
         )
+        if value is not None:
+            self._mark_entity_health(self._real_entity_id, True)
+        return value
 
     def _get_real_current_humidity(self) -> float | None:
         if not self._real_state:
@@ -1610,6 +1643,48 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                         payload[ATTR_TARGET_TEMP_LOW] = real_low
                         parts.append(f"Low={constrained_low}")
                         self._virtual_target_temperature_low = constrained_low
+
+                if ATTR_TARGET_TEMP_LOW in payload and ATTR_TARGET_TEMP_HIGH in payload:
+                    p_low = payload[ATTR_TARGET_TEMP_LOW]
+                    p_high = payload[ATTR_TARGET_TEMP_HIGH]
+                    p_heat = False
+                    p_cool = False
+                    if display_current is not None:
+                        if display_current <= (
+                            self._virtual_target_temperature_low or p_low
+                        ):
+                            p_heat = True
+                        elif display_current >= (
+                            self._virtual_target_temperature_high or p_high
+                        ):
+                            p_cool = True
+                    adj_low, adj_high = self._enforce_min_dual_spread(
+                        p_low, p_high, prioritize_heat=p_heat, prioritize_cool=p_cool
+                    )
+                    payload[ATTR_TARGET_TEMP_LOW] = adj_low
+                    payload[ATTR_TARGET_TEMP_HIGH] = adj_high
+                elif ATTR_TARGET_TEMP_LOW in payload:
+                    current_high = self._get_real_target_temperature_high()
+                    if current_high is not None:
+                        adj_low, adj_high = self._enforce_min_dual_spread(
+                            payload[ATTR_TARGET_TEMP_LOW],
+                            current_high,
+                            prioritize_heat=True,
+                        )
+                        payload[ATTR_TARGET_TEMP_LOW] = adj_low
+                        if adj_high != current_high:
+                            payload[ATTR_TARGET_TEMP_HIGH] = adj_high
+                elif ATTR_TARGET_TEMP_HIGH in payload:
+                    current_low = self._get_real_target_temperature_low()
+                    if current_low is not None:
+                        adj_low, adj_high = self._enforce_min_dual_spread(
+                            current_low,
+                            payload[ATTR_TARGET_TEMP_HIGH],
+                            prioritize_cool=True,
+                        )
+                        payload[ATTR_TARGET_TEMP_HIGH] = adj_high
+                        if adj_low != current_low:
+                            payload[ATTR_TARGET_TEMP_LOW] = adj_low
 
                 if ATTR_HVAC_MODE in kwargs and kwargs[ATTR_HVAC_MODE] is not None:
                     payload[ATTR_HVAC_MODE] = kwargs[ATTR_HVAC_MODE]
@@ -2542,6 +2617,32 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         if calculated_real_high is not None and overdrive_adjust_high != 0.0:
             calculated_real_high += overdrive_adjust_high
 
+        prioritize_heat = (
+            overdrive_adjust_low > 0.0
+            or self._active_overdrive_heat
+            or (
+                self._virtual_target_temperature_low is not None
+                and sensor_temp < self._virtual_target_temperature_low
+            )
+        )
+        prioritize_cool = (
+            overdrive_adjust_high < 0.0
+            or self._active_overdrive_cool
+            or self._active_overdrive_humidity
+            or (
+                self._virtual_target_temperature_high is not None
+                and sensor_temp > self._virtual_target_temperature_high
+            )
+        )
+
+        if calculated_real_low is not None and calculated_real_high is not None:
+            calculated_real_low, calculated_real_high = self._enforce_min_dual_spread(
+                calculated_real_low,
+                calculated_real_high,
+                prioritize_heat=prioritize_heat,
+                prioritize_cool=prioritize_cool,
+            )
+
         desired_real_low = (
             self._apply_target_constraints(
                 self._apply_safety_clamp(
@@ -2562,6 +2663,14 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             if calculated_real_high is not None
             else None
         )
+
+        if desired_real_low is not None and desired_real_high is not None:
+            desired_real_low, desired_real_high = self._enforce_min_dual_spread(
+                desired_real_low,
+                desired_real_high,
+                prioritize_heat=prioritize_heat,
+                prioritize_cool=prioritize_cool,
+            )
 
         current_real_low = self._get_real_target_temperature_low()
         current_real_high = self._get_real_target_temperature_high()
@@ -2910,6 +3019,101 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         if max_temp is not None:
             result = min(result, max_temp)
         return self._round_temperature(result)
+
+    def _get_min_dual_temp_spread(self) -> float:
+        """Return the minimum spread required between low and high targets."""
+        if self._min_dual_temp_spread is not None and self._min_dual_temp_spread > 0:
+            return self._min_dual_temp_spread
+        if self.temperature_unit == UnitOfTemperature.CELSIUS:
+            return DEFAULT_MIN_DUAL_TEMP_SPREAD_CELSIUS
+        return DEFAULT_MIN_DUAL_TEMP_SPREAD_FAHRENHEIT
+
+    def _enforce_min_dual_spread(
+        self,
+        low: float,
+        high: float,
+        prioritize_heat: bool = False,
+        prioritize_cool: bool = False,
+    ) -> tuple[float, float]:
+        """Ensure the spread between low and high targets satisfies the minimum required spread."""
+        min_spread = self._get_min_dual_temp_spread()
+        if (high - low) >= (min_spread - 1e-4):
+            return low, high
+
+        if (
+            self.min_temp is not None
+            and self.max_temp is not None
+            and (self.max_temp - self.min_temp) < min_spread
+        ):
+            return self.min_temp, self.max_temp
+
+        shortfall = min_spread - (high - low)
+        if prioritize_heat and not prioritize_cool:
+            new_low = low
+            new_high = low + min_spread
+            if self.max_temp is not None and new_high > self.max_temp:
+                new_high = self.max_temp
+                new_low = new_high - min_spread
+                if self.min_temp is not None and new_low < self.min_temp:
+                    new_low = self.min_temp
+        elif prioritize_cool and not prioritize_heat:
+            new_high = high
+            new_low = high - min_spread
+            if self.min_temp is not None and new_low < self.min_temp:
+                new_low = self.min_temp
+                new_high = new_low + min_spread
+                if self.max_temp is not None and new_high > self.max_temp:
+                    new_high = self.max_temp
+        else:
+            half = shortfall / 2.0
+            new_low = low - half
+            new_high = high + half
+            if self.min_temp is not None and new_low < self.min_temp:
+                new_low = self.min_temp
+                new_high = min(
+                    self.max_temp if self.max_temp is not None else float("inf"),
+                    new_low + min_spread,
+                )
+            elif self.max_temp is not None and new_high > self.max_temp:
+                new_high = self.max_temp
+                new_low = max(
+                    self.min_temp if self.min_temp is not None else float("-inf"),
+                    new_high - min_spread,
+                )
+
+        constrained_low = self._apply_target_constraints(new_low)
+        constrained_high = self._apply_target_constraints(new_high)
+        if constrained_low is not None and constrained_high is not None:
+            new_low, new_high = constrained_low, constrained_high
+
+        step = self.target_temperature_step or 0.5
+        if (new_high - new_low) < (min_spread - 1e-4):
+            if prioritize_heat and not prioritize_cool:
+                candidate_high = self._apply_target_constraints(new_low + min_spread)
+                if candidate_high is not None:
+                    new_high = candidate_high
+                if (new_high - new_low) < (min_spread - 1e-4):
+                    candidate_high = self._apply_target_constraints(new_high + step)
+                    if candidate_high is not None:
+                        new_high = candidate_high
+            elif prioritize_cool and not prioritize_heat:
+                candidate_low = self._apply_target_constraints(new_high - min_spread)
+                if candidate_low is not None:
+                    new_low = candidate_low
+                if (new_high - new_low) < (min_spread - 1e-4):
+                    candidate_low = self._apply_target_constraints(new_low - step)
+                    if candidate_low is not None:
+                        new_low = candidate_low
+            else:
+                candidate_high = self._apply_target_constraints(new_low + min_spread)
+                if candidate_high is not None:
+                    new_high = candidate_high
+                if (new_high - new_low) < (min_spread - 1e-4):
+                    candidate_high = self._apply_target_constraints(new_high + step)
+                    if candidate_high is not None:
+                        new_high = candidate_high
+
+        return new_low, new_high
 
     def _apply_safety_clamp(
         self,

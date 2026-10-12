@@ -93,17 +93,30 @@
         "title": "Defaults",
         "description": "Optionally rename the physical thermostat preset and decide which sensor (including the last active one) should be active on startup.",
         "data": {
-          "physical_sensor_name": "Physical thermostat preset name",
+          "cooldown_period": "Adjustment cooldown (seconds)",
           "default_sensor": "Default sensor",
-          "cooldown_period": "Minimum adjustment interval (seconds)",
-          "min_temp": "Minimum safe temperature limit (set to 0 to disable)",
-          "max_temp": "Maximum safe temperature limit (set to 0 to disable)",
-          "max_sync_offset": "Maximum allowed offset from target temperature (0 to disable, default 10.0)",
-          "disable_auto_switch": "Disable auto-switch to physical sensor",
-          "max_humidity_overcool": "Maximum cooling degrees allowed for dehumidification (0 to disable, default 2.0)",
           "default_target_humidity": "Default target humidity (%)",
+          "max_humidity_overcool": "Humidity overcool limit",
+          "max_sync_offset": "Maximum sync offset",
+          "max_temp": "Maximum safe temperature",
+          "min_dual_temp_spread": "Minimum dual setpoint deadband",
+          "min_temp": "Minimum safe temperature",
+          "physical_sensor_name": "Physical thermostat preset name",
           "physical_target_change_behavior": "Physical target change behavior",
-          "sensor_change_threshold": "Sensor change threshold (degrees before updating physical thermostat, 0 to disable, default 0.0)"
+          "sensor_change_threshold": "Sensor change threshold"
+        },
+        "data_description": {
+          "cooldown_period": "Minimum wait time between setpoint adjustments sent to the physical thermostat to prevent short-cycling. Set to 0 to disable.",
+          "default_sensor": "Sensor preset to activate on startup or when the integration reloads. Choose a specific sensor or 'Last active sensor'.",
+          "default_target_humidity": "Initial target relative humidity percentage slider on the proxy entity (30% - 99%).",
+          "max_humidity_overcool": "Maximum degrees the system may cool below target temperature to dehumidify the room when high humidity is detected. Set to 0 to disable (default 2.0°).",
+          "max_sync_offset": "Maximum degrees of offset allowed between the active sensor and physical setpoint. Protects against wild offsets if a sensor is faulty. Set to 0 to disable (default 10.0°).",
+          "max_temp": "Highest allowable target temperature (safety ceiling). Any target above this is clamped. Set to 0 to disable.",
+          "min_dual_temp_spread": "Minimum degree separation between heat and cool setpoints sent to the physical thermostat in Heat/Cool mode (e.g. 5.0°F for ecobee). Prevents hardware firmware setpoint clamping. Set to 0 for automatic.",
+          "min_temp": "Lowest allowable target temperature (safety floor). Any target below this is clamped. Set to 0 to disable.",
+          "physical_sensor_name": "Preset name for the physical thermostat's internal temperature sensor (defaults to 'Physical Entity').",
+          "physical_target_change_behavior": "How the proxy responds when setpoints are changed directly on the physical thermostat hardware (e.g., turning the physical dial).",
+          "sensor_change_threshold": "Minimum temperature change required at the active sensor before updating the physical thermostat. Filters out noise and frequent micro-adjustments. Set to 0 to disable."
         }
       }
     },
@@ -127,16 +140,28 @@
       "init": {
         "title": "Thermostat Proxy options",
         "data": {
+          "cooldown_period": "Adjustment cooldown (seconds)",
           "default_sensor": "Default sensor",
-          "cooldown_period": "Minimum adjustment interval (seconds)",
-          "min_temp": "Minimum safe temperature limit (set to 0 to disable)",
-          "max_temp": "Maximum safe temperature limit (set to 0 to disable)",
-          "max_sync_offset": "Maximum allowed offset from target temperature (0 to disable, default 10.0)",
-          "disable_auto_switch": "Disable auto-switch to physical sensor",
-          "max_humidity_overcool": "Maximum cooling degrees allowed for dehumidification (0 to disable, default 2.0)",
           "default_target_humidity": "Default target humidity (%)",
+          "max_humidity_overcool": "Humidity overcool limit",
+          "max_sync_offset": "Maximum sync offset",
+          "max_temp": "Maximum safe temperature",
+          "min_dual_temp_spread": "Minimum dual setpoint deadband",
+          "min_temp": "Minimum safe temperature",
           "physical_target_change_behavior": "Physical target change behavior",
-          "sensor_change_threshold": "Sensor change threshold (degrees before updating physical thermostat, 0 to disable, default 0.0)"
+          "sensor_change_threshold": "Sensor change threshold"
+        },
+        "data_description": {
+          "cooldown_period": "Minimum wait time between setpoint adjustments sent to the physical thermostat to prevent short-cycling. Set to 0 to disable.",
+          "default_sensor": "Sensor preset to activate on startup or when the integration reloads. Choose a specific sensor or 'Last active sensor'.",
+          "default_target_humidity": "Initial target relative humidity percentage slider on the proxy entity (30% - 99%).",
+          "max_humidity_overcool": "Maximum degrees the system may cool below target temperature to dehumidify the room when high humidity is detected. Set to 0 to disable (default 2.0°).",
+          "max_sync_offset": "Maximum degrees of offset allowed between the active sensor and physical setpoint. Protects against wild offsets if a sensor is faulty. Set to 0 to disable (default 10.0°).",
+          "max_temp": "Highest allowable target temperature (safety ceiling). Any target above this is clamped. Set to 0 to disable.",
+          "min_dual_temp_spread": "Minimum degree separation between heat and cool setpoints sent to the physical thermostat in Heat/Cool mode (e.g. 5.0°F for ecobee). Prevents hardware firmware setpoint clamping. Set to 0 for automatic.",
+          "min_temp": "Lowest allowable target temperature (safety floor). Any target below this is clamped. Set to 0 to disable.",
+          "physical_target_change_behavior": "How the proxy responds when setpoints are changed directly on the physical thermostat hardware (e.g., turning the physical dial).",
+          "sensor_change_threshold": "Minimum temperature change required at the active sensor before updating the physical thermostat. Filters out noise and frequent micro-adjustments. Set to 0 to disable."
         }
       }
     },
