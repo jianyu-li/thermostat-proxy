@@ -153,6 +153,7 @@ _RESERVED_REAL_ATTRIBUTES = {
     "max_humidity",
     "min_temp",
     "max_temp",
+    "temperature_unit",
 }
 
 # Extensibility hook: add HVACMode values here to block remote sensors in those modes.
@@ -591,6 +592,12 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         while self._unsub_listeners:
             unsubscribe = self._unsub_listeners.pop()
             unsubscribe()
+
+    @callback
+    def async_entity_id_changed(self, old_entity_id: str) -> None:
+        """Handle entity_id change in place."""
+        if hasattr(super(), "async_entity_id_changed"):
+            super().async_entity_id_changed(old_entity_id)
 
     def _enforce_hvac_mode_restrictions(self, hvac_mode_str: str | None = None) -> None:
         """Ensure proxy is restricted to the physical sensor if in an unsupported mode."""
@@ -1153,10 +1160,11 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         )
 
     def _discover_temperature_unit(self) -> str:
-        if self._real_state and (
-            unit := self._real_state.attributes.get("unit_of_measurement")
-        ):
-            return unit
+        if self._real_state:
+            if unit := self._real_state.attributes.get("temperature_unit"):
+                return unit
+            if unit := self._real_state.attributes.get("unit_of_measurement"):
+                return unit
         return self.hass.config.units.temperature_unit or UnitOfTemperature.CELSIUS
 
     def _get_real_current_temperature(self) -> float | None:
@@ -1172,10 +1180,10 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         if value is not None:
             humidity = self._real_state.attributes.get(ATTR_CURRENT_HUMIDITY)
             is_uninitialized_temp = (
-                self.temperature_unit == UnitOfTemperature.FAHRENHEIT
+                self.native_temperature_unit == UnitOfTemperature.FAHRENHEIT
                 and math.isclose(value, UNINITIALIZED_TEMP_FAHRENHEIT, abs_tol=0.1)
             ) or (
-                self.temperature_unit == UnitOfTemperature.CELSIUS
+                self.native_temperature_unit == UnitOfTemperature.CELSIUS
                 and math.isclose(value, UNINITIALIZED_TEMP_CELSIUS, abs_tol=0.1)
             )
             is_below_min = self._min_temp is not None and value < (self._min_temp - 0.1)
@@ -1186,7 +1194,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     self.entity_id,
                     self._real_entity_id,
                     value,
-                    self.temperature_unit or "",
+                    self.native_temperature_unit or "",
                     humidity,
                 )
                 self._mark_entity_health(self._real_entity_id, False)
@@ -1361,8 +1369,13 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         return new_target
 
     @property
-    def temperature_unit(self) -> str:
+    def native_temperature_unit(self) -> str:
         return self._temperature_unit or self.hass.config.units.temperature_unit
+
+    @property
+    def temperature_unit(self) -> str:
+        """Backward compatibility for Home Assistant < 2026.11."""
+        return self.native_temperature_unit
 
     @property
     def min_temp(self) -> float:
@@ -1443,11 +1456,16 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             return DEFAULT_PRECISION
 
     @property
-    def current_temperature(self) -> float | None:
+    def native_current_temperature(self) -> float | None:
         return (
             self._get_active_sensor_temperature()
             or self._get_real_current_temperature()
         )
+
+    @property
+    def current_temperature(self) -> float | None:
+        """Backward compatibility for Home Assistant < 2026.11."""
+        return self.native_current_temperature
 
     @property
     def current_humidity(self) -> float | None:
@@ -1485,7 +1503,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         return self.hvac_mode in (HVACMode.HEAT_COOL, HVACMode.AUTO)
 
     @property
-    def target_temperature(self) -> float | None:
+    def native_target_temperature(self) -> float | None:
         if self.is_range_mode:
             return None
         if self._virtual_target_temperature is not None:
@@ -1493,7 +1511,12 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         return self._get_real_target_temperature()
 
     @property
-    def target_temperature_high(self) -> float | None:
+    def target_temperature(self) -> float | None:
+        """Backward compatibility for Home Assistant < 2026.11."""
+        return self.native_target_temperature
+
+    @property
+    def native_target_temperature_high(self) -> float | None:
         if self.is_range_mode:
             if self._virtual_target_temperature_high is not None:
                 return self._virtual_target_temperature_high
@@ -1501,12 +1524,22 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         return None
 
     @property
-    def target_temperature_low(self) -> float | None:
+    def target_temperature_high(self) -> float | None:
+        """Backward compatibility for Home Assistant < 2026.11."""
+        return self.native_target_temperature_high
+
+    @property
+    def native_target_temperature_low(self) -> float | None:
         if self.is_range_mode:
             if self._virtual_target_temperature_low is not None:
                 return self._virtual_target_temperature_low
             return self._get_real_target_temperature_low()
         return None
+
+    @property
+    def target_temperature_low(self) -> float | None:
+        """Backward compatibility for Home Assistant < 2026.11."""
+        return self.native_target_temperature_low
 
     @property
     def hvac_mode(self) -> HVACMode | None:
@@ -1616,7 +1649,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 requested_high = _coerce_temperature(high)
                 requested_low = _coerce_temperature(low)
 
-                display_current = self.current_temperature
+                display_current = self.native_current_temperature
                 real_current = self._get_real_current_temperature()
 
                 payload = {ATTR_ENTITY_ID: self._real_entity_id}
@@ -1744,7 +1777,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     constrained_target,
                 )
 
-            display_current = self.current_temperature
+            display_current = self.native_current_temperature
             real_current = self._get_real_current_temperature()
             if display_current is None or real_current is None:
                 _LOGGER.warning(
@@ -1979,7 +2012,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             sensor_entity = (
                 self._real_entity_id if sensor.is_physical else sensor.entity_id
             )
-        unit = self.temperature_unit or ""
+        unit = self.native_temperature_unit or ""
         sensor_temp = self._get_active_sensor_temperature()
         sensor_display = self._format_log_temperature(sensor_temp)
         segments = [f"sensor_name={preset_mode}"]
@@ -2013,7 +2046,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
     ) -> None:
         """Record a logbook entry when we auto-sync to the real thermostat."""
 
-        unit = self.temperature_unit or ""
+        unit = self.native_temperature_unit or ""
         sensor_temp = self._get_active_sensor_temperature()
         real_current = self._get_real_current_temperature()
 
@@ -2103,7 +2136,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
     ) -> None:
         """Record when an external change forces us to the physical preset."""
 
-        unit = self.temperature_unit or ""
+        unit = self.native_temperature_unit or ""
         real_target_display = self._format_log_temperature(real_target)
         target_segment = None
         if real_target_display is not None:
@@ -2723,7 +2756,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         if overdrive_active:
             reason += " (overdrive)"
 
-        unit = self.temperature_unit or ""
+        unit = self.native_temperature_unit or ""
         message = (
             "Adjusted dual setpoints on %s to %s (%s): sensor=%s%s, real_current=%s%s"
             % (
@@ -3024,7 +3057,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         """Return the minimum spread required between low and high targets."""
         if self._min_dual_temp_spread is not None and self._min_dual_temp_spread > 0:
             return self._min_dual_temp_spread
-        if self.temperature_unit == UnitOfTemperature.CELSIUS:
+        if self.native_temperature_unit == UnitOfTemperature.CELSIUS:
             return DEFAULT_MIN_DUAL_TEMP_SPREAD_CELSIUS
         return DEFAULT_MIN_DUAL_TEMP_SPREAD_FAHRENHEIT
 
@@ -3185,7 +3218,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             limit_value = effective_max
 
         if clamped:
-            unit = self.temperature_unit or ""
+            unit = self.native_temperature_unit or ""
             limit_source = (
                 "max_sync_offset"
                 if clamp_reason and clamp_reason.startswith("max_sync_offset")
@@ -3259,7 +3292,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
     ) -> None:
         if desired_target is None:
             return
-        unit = self.temperature_unit or ""
+        unit = self.native_temperature_unit or ""
         sensor_display = self._format_log_temperature(sensor_temp)
         virtual_display = self._format_log_temperature(virtual_target)
         real_display = self._format_log_temperature(real_current)

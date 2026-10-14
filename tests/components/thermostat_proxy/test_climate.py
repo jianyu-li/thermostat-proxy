@@ -187,3 +187,76 @@ async def test_overdrive_short_cycling_and_threshold(hass):
     await proxy._async_realign_real_target_from_sensor(trigger_source="cooldown_expired")
     # Target reached, overdrive should deactivate
     assert not proxy._active_overdrive_cool
+
+
+@pytest.mark.asyncio
+async def test_native_temperature_properties(hass):
+    """Test that native_* temperature properties match their deprecated aliases."""
+    proxy = create_proxy(hass)
+    proxy._temperature_unit = "°C"
+    proxy._virtual_target_temperature = 21.5
+
+    assert proxy.native_temperature_unit == "°C"
+    assert proxy.temperature_unit == proxy.native_temperature_unit
+
+    assert proxy.native_current_temperature == 20.0
+    assert proxy.current_temperature == proxy.native_current_temperature
+
+    assert proxy.native_target_temperature == 21.5
+    assert proxy.target_temperature == proxy.native_target_temperature
+
+    # Range mode targets
+    proxy._virtual_target_temperature_low = 19.0
+    proxy._virtual_target_temperature_high = 23.0
+    proxy._real_state = State(
+        "climate.real",
+        HVACMode.HEAT_COOL,
+        {
+            "current_temperature": 20.0,
+            "target_temp_high": 24.0,
+            "target_temp_low": 18.0,
+            "supported_features": ClimateEntityFeature.TARGET_TEMPERATURE_RANGE,
+        },
+    )
+    proxy._update_real_temperature_limits()
+
+    assert proxy.native_target_temperature is None
+    assert proxy.target_temperature is None
+    assert proxy.native_target_temperature_low == 19.0
+    assert proxy.target_temperature_low == proxy.native_target_temperature_low
+    assert proxy.native_target_temperature_high == 23.0
+    assert proxy.target_temperature_high == proxy.native_target_temperature_high
+
+
+@pytest.mark.asyncio
+async def test_discover_temperature_unit_and_reserved_attribute(hass):
+    """Test that temperature_unit is discovered from real thermostat state attributes and excluded from extra_state_attributes."""
+    proxy = create_proxy(hass)
+
+    # Real thermostat state has the new temperature_unit attribute (HA Core 2026.11+)
+    hass.states.async_set(
+        "climate.real",
+        HVACMode.HEAT,
+        {
+            "current_temperature": 68.0,
+            "temperature": 70.0,
+            "temperature_unit": "°F",
+        },
+    )
+    proxy._real_state = hass.states.get("climate.real")
+
+    # _discover_temperature_unit should pick up "temperature_unit"
+    assert proxy._discover_temperature_unit() == "°F"
+
+    # extra_state_attributes must NOT include "temperature_unit"
+    assert "temperature_unit" not in proxy.extra_state_attributes
+
+
+@pytest.mark.asyncio
+async def test_async_entity_id_changed(hass):
+    """Test that async_entity_id_changed executes without errors."""
+    proxy = create_proxy(hass)
+    proxy.entity_id = "climate.test_proxy_new"
+    # Should run without error whether or not super() implements it
+    proxy.async_entity_id_changed("climate.test_proxy_old")
+
