@@ -3,6 +3,5 @@
   "content_in_root": false,
   "zip_release": true,
   "filename": "thermostat_proxy.zip",
-  "render_readme": true,
-  "homeassistant": "2026.11.0"
+  "render_readme": true
 }
