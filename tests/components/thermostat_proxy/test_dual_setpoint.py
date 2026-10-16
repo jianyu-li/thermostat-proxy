@@ -9,9 +9,6 @@ from homeassistant.components.climate import HVACMode, ClimateEntityFeature, HVA
 from custom_components.thermostat_proxy.climate import CustomThermostatEntity
 
 
-
-
-
 def create_dual_proxy(hass, thermostat="climate.real", hvac_mode=HVACMode.HEAT_COOL):
     """Helper to create a configured CustomThermostatEntity in dual setpoint mode."""
     proxy = CustomThermostatEntity(
@@ -376,3 +373,113 @@ async def test_dual_setpoint_no_false_unavailable_entities(hass):
     assert proxy.extra_state_attributes["unavailable_entities"] == []
     assert proxy._entity_health.get("climate.real") is True
 
+
+@pytest.mark.asyncio
+async def test_dual_setpoint_satisfied_cooling_prevents_rounding_crossover(hass):
+    """Test that integer step rounding does not round satisfied cooling target down to real_current."""
+    proxy = create_dual_proxy(hass)
+    proxy._temperature_unit = "°F"
+
+    # Real thermostat has integer step (step falls back to 1.0)
+    # Real is at 71.0°F, idle, currently set to 75.0 high
+    proxy._real_state = State(
+        "climate.real",
+        HVACMode.HEAT_COOL,
+        {
+            "current_temperature": 71.0,
+            "target_temp_low": 67.0,
+            "target_temp_high": 75.0,
+            "hvac_action": HVACAction.IDLE,
+            "supported_features": ClimateEntityFeature.TARGET_TEMPERATURE_RANGE,
+        },
+    )
+    proxy._update_real_temperature_limits()
+
+    proxy._virtual_target_temperature_low = 68.0
+    proxy._virtual_target_temperature_high = 72.0
+
+    # Remote sensor is at 71.6°F (satisfied cooling: 71.6 < 72.0)
+    # delta_high = 72.0 - 71.6 = +0.4°F
+    # calc_real = 71.0 + 0.4 = 71.4°F
+    # Standard integer rounding: round(71.4) = 71.0°F
+    # Setting high target to 71.0 when real current is 71.0 would trigger cooling!
+    # _prevent_satisfied_rounding_crossover ensures it steps up to 72.0°F.
+    proxy._sensor_states["sensor.remote"] = State("sensor.remote", "71.6")
+
+    await proxy._async_realign_real_target_from_sensor()
+
+    # The high target sent to physical thermostat should be 72.0, NOT 71.0
+    assert hass.services.async_call.called
+    args, kwargs = hass.services.async_call.call_args
+    assert args[0] == "climate"
+    assert args[1] == "set_temperature"
+    assert args[2]["target_temp_high"] == 72.0
+
+
+@pytest.mark.asyncio
+async def test_dual_setpoint_satisfied_heating_prevents_rounding_crossover(hass):
+    """Test that integer step rounding does not round satisfied heating target up to real_current."""
+    proxy = create_dual_proxy(hass)
+    proxy._temperature_unit = "°F"
+
+    # Real thermostat has integer step
+    # Real is at 68.0°F, idle, currently set to 65.0 low
+    proxy._real_state = State(
+        "climate.real",
+        HVACMode.HEAT_COOL,
+        {
+            "current_temperature": 68.0,
+            "target_temp_low": 65.0,
+            "target_temp_high": 75.0,
+            "hvac_action": HVACAction.IDLE,
+            "supported_features": ClimateEntityFeature.TARGET_TEMPERATURE_RANGE,
+        },
+    )
+    proxy._update_real_temperature_limits()
+
+    proxy._virtual_target_temperature_low = 68.0
+    proxy._virtual_target_temperature_high = 75.0
+
+    # Remote sensor is at 68.4°F (satisfied heating: 68.4 > 68.0)
+    # delta_low = 68.0 - 68.4 = -0.4°F
+    # calc_real = 68.0 - 0.4 = 67.6°F
+    # Standard integer rounding: round(67.6) = 68.0°F
+    # Setting low target to 68.0 when real current is 68.0 would trigger heating!
+    # _prevent_satisfied_rounding_crossover ensures it steps down to 67.0°F.
+    proxy._sensor_states["sensor.remote"] = State("sensor.remote", "68.4")
+
+    await proxy._async_realign_real_target_from_sensor()
+
+    assert hass.services.async_call.called
+    args, kwargs = hass.services.async_call.call_args
+    assert args[0] == "climate"
+    assert args[1] == "set_temperature"
+    assert args[2]["target_temp_low"] == 67.0
+
+
+@pytest.mark.asyncio
+async def test_target_temperature_step_property_fallback(hass):
+    """Test target_temperature_step property fallback logic."""
+    proxy = create_dual_proxy(hass)
+
+    # 1. When physical has target_temp_step attribute, it uses it
+    proxy._real_state = State(
+        "climate.real",
+        HVACMode.HEAT_COOL,
+        {"target_temp_step": 0.5},
+    )
+    proxy._update_real_temperature_limits()
+    assert proxy.target_temperature_step == 0.5
+
+    # 2. When physical does not have target_temp_step, falls back by unit
+    proxy._real_state = State(
+        "climate.real",
+        HVACMode.HEAT_COOL,
+        {},
+    )
+    proxy._update_real_temperature_limits()
+    proxy._temperature_unit = "°F"
+    assert proxy.target_temperature_step == 1.0
+
+    proxy._temperature_unit = "°C"
+    assert proxy.target_temperature_step == 0.1

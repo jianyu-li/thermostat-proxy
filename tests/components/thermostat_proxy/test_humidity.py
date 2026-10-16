@@ -19,7 +19,7 @@ from custom_components.thermostat_proxy.const import (
     DOMAIN,
 )
 from homeassistant import config_entries
-from homeassistant.components.climate import ClimateEntityFeature, HVACMode
+from homeassistant.components.climate import ClimateEntityFeature, HVACAction, HVACMode
 from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import Context, HomeAssistant, State
 from homeassistant.data_entry_flow import FlowResultType
@@ -268,7 +268,8 @@ async def test_async_set_humidity_logbook_entry(hass: HomeAssistant):
     await proxy.async_set_humidity(45)
 
     logbook_calls = [
-        call for call in hass.services.async_call.call_args_list
+        call
+        for call in hass.services.async_call.call_args_list
         if call[0][0] == "logbook"
     ]
     assert len(logbook_calls) >= 1
@@ -299,7 +300,8 @@ async def test_async_set_humidity_logbook_with_actor(hass: HomeAssistant):
     await proxy.async_set_humidity(42)
 
     logbook_calls = [
-        call for call in hass.services.async_call.call_args_list
+        call
+        for call in hass.services.async_call.call_args_list
         if call[0][0] == "logbook"
     ]
     assert len(logbook_calls) >= 1
@@ -523,3 +525,87 @@ async def test_config_flow_with_humidity_sensor(hass: HomeAssistant):
         )
         assert result["data"][CONF_MAX_HUMIDITY_OVERCOOL] == 1.5
         assert result["data"][CONF_DEFAULT_TARGET_HUMIDITY] == 45
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hvac_mode", [HVACMode.HEAT_COOL, HVACMode.AUTO])
+async def test_no_humidity_overdrive_in_heat_cool_or_auto_modes(
+    hass: HomeAssistant, hvac_mode: HVACMode
+):
+    """Test that humidity overdrive is never active in dual setpoint modes (heat_cool or auto)."""
+    proxy = create_proxy_with_humidity(hass)
+
+    proxy._real_state = State(
+        "climate.real",
+        hvac_mode,
+        {
+            "current_temperature": 71.0,
+            "target_temp_low": 68.0,
+            "target_temp_high": 72.0,
+            "hvac_action": HVACAction.IDLE,
+            "target_temp_step": 1.0,
+            "supported_features": ClimateEntityFeature.TARGET_TEMPERATURE_RANGE,
+        },
+    )
+    proxy._temperature_unit = "°F"
+    proxy._virtual_target_temperature_low = 68.0
+    proxy._virtual_target_temperature_high = 72.0
+    proxy._virtual_target_humidity = 45
+
+    # Remote sensor is at 71.1°F (satisfied within [68, 72] range)
+    proxy._sensor_states["sensor.remote_temp"] = State("sensor.remote_temp", "71.1")
+    # Humidity is high at 60% (> 45% + 2% deadband)
+    hass.states.async_set("sensor.remote_humidity", "60")
+    proxy._sensor_humidity_states["sensor.remote_humidity"] = State(
+        "sensor.remote_humidity", "60"
+    )
+
+    await proxy._async_realign_real_target_from_sensor()
+
+    # Humidity overdrive must NOT engage in dual-setpoint mode
+    assert proxy._active_overdrive_humidity is False
+    assert proxy.extra_state_attributes[ATTR_HUMIDITY_OVERDRIVE_ACTIVE] is False
+
+
+@pytest.mark.asyncio
+async def test_humidity_overdrive_cool_mode_when_sensor_below_target(
+    hass: HomeAssistant,
+):
+    """Test that in COOL mode when sensor is below target, positive temp delta does not cancel humidity overdrive."""
+    proxy = create_proxy_with_humidity(hass)
+
+    proxy._real_state = State(
+        "climate.real",
+        HVACMode.COOL,
+        {
+            "current_temperature": 71.0,
+            "temperature": 72.0,
+            "hvac_action": HVACAction.IDLE,
+            "target_temp_step": 1.0,
+            "supported_features": ClimateEntityFeature.TARGET_TEMPERATURE,
+        },
+    )
+    proxy._temperature_unit = "°F"
+    proxy._virtual_target_temperature = 72.0
+    proxy._virtual_target_humidity = 45
+
+    # Remote sensor is 71.1°F (satisfied: 71.1 < 72.0, so delta = +0.9)
+    proxy._sensor_states["sensor.remote_temp"] = State("sensor.remote_temp", "71.1")
+    # Humidity is high at 60% (> 45% + 2% deadband)
+    hass.states.async_set("sensor.remote_humidity", "60")
+    proxy._sensor_humidity_states["sensor.remote_humidity"] = State(
+        "sensor.remote_humidity", "60"
+    )
+
+    await proxy._async_realign_real_target_from_sensor()
+
+    # Overdrive must engage and push real target down
+    # Without clamping, delta (+0.9) + overdrive (-1.0) = -0.1 -> real target 71.0 - 0.1 = 70.9 -> rounded to 71.0
+    # With clamping, min(0.0, 0.9) = 0.0 + overdrive (-1.0) = -1.0 -> real target 71.0 - 1.0 = 70.0!
+    assert proxy._active_overdrive_humidity is True
+    assert proxy.extra_state_attributes[ATTR_HUMIDITY_OVERDRIVE_ACTIVE] is True
+    assert hass.services.async_call.called
+    args, _ = hass.services.async_call.call_args
+    assert args[0] == "climate"
+    assert args[1] == "set_temperature"
+    assert args[2]["temperature"] == 70.0
