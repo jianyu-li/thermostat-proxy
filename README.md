@@ -31,7 +31,7 @@ A Home Assistant custom integration that lets you expose a virtual `climate` ent
 - **Sensor Change Threshold**: Configurable `sensor_change_threshold` (e.g. 0.5°) to prevent equipment short-cycling by filtering minor sensor fluctuations, while always overriding the threshold when the remote sensor reaches or crosses the target temperature.
 - Default sensor selector includes a "Last active sensor" option (during setup or in options) so the proxy resumes with the most recently selected sensor instead of the configured default.
 - **Humidity Sensor Pairing**: Optionally bind a humidity sensor to any preset. When that preset is active, `current_humidity` reads from the paired humidity sensor. If a paired humidity sensor is unavailable/offline or if a preset has no paired humidity sensor, `current_humidity` seamlessly falls back to the physical thermostat's built-in humidity reading.
-- **Humidity Overdrive**: When the active preset has a paired humidity sensor and the current humidity exceeds the target, the proxy can overcool (lower the cooling setpoint) to run the compressor for dehumidification, even when the temperature target is already met. A configurable `max_humidity_overcool` limit prevents excessive cooling.
+- **Humidity Overdrive**: When operating in dedicated `COOL` mode with an active preset that has a paired humidity sensor and current humidity exceeds the target, the proxy can overcool (lower the cooling setpoint) to run the compressor for dehumidification, even when the temperature target is already met. A configurable `max_humidity_overcool` limit prevents excessive cooling (disabled in `HEAT_COOL` and `AUTO` dual-setpoint modes to prevent short-cycling or deadband collisions).
 
 ## Configuration
 
@@ -49,7 +49,7 @@ A Home Assistant custom integration that lets you expose a virtual `climate` ent
 | `disable_auto_switch` | No | `False` | **Disable Auto-Switch**: When turned on, the proxy will maintain the active remote sensor and its offset when a manual change is made directly on the physical thermostat, instead of automatically falling back to the physical preset. |
 | `preserve_virtual_target` | No | `False` | **Preserve Virtual Target**: Prevents physical target changes from changing the virtual target, e.g. when a cloud integration reports delayed updates. This also applies to changes made on the thermostat or through another app. Requires `disable_auto_switch` to be enabled and a remote sensor to be selected. |
 | `sensor_change_threshold` | No | `0.0` (Disabled) | **Sensor Change Threshold**: Minimum temperature change (in degrees) required on the active remote sensor before pushing a setpoint adjustment to the physical thermostat. Prevents short-cycling while ensuring target crossings immediately trigger adjustments. |
-| `max_humidity_overcool` | No | `2.0` | **Maximum Dehumidification Overcool**: Maximum degrees the proxy is allowed to lower the cooling setpoint below the temperature target for dehumidification. Set to 0 to disable humidity overdrive entirely. |
+| `max_humidity_overcool` | No | `2.0` | **Maximum Dehumidification Overcool**: Maximum degrees the proxy is allowed to lower the cooling setpoint below the temperature target for dehumidification in Cool mode. Set to 0 to disable humidity overdrive entirely. |
 | `default_target_humidity` | No | `50` | **Default Target Humidity (%)**: The initial target humidity percentage used when no previous value has been restored. Adjustable at runtime via `climate.set_humidity`. |
 
 ## How It Works
@@ -150,7 +150,7 @@ mode: single
 - **Disable built-in Comfort/Eco/Schedule modes**: Disable any comfort modes, eco modes, follow me, or schedules configured directly on the physical thermostat (or via its proprietary app/integration). Because these modes change the target temperature setpoints outside of this integration, they will cause the proxy to detect a manual change and automatically fall back to the `Physical Entity` preset.
 - If you pick a specific default sensor instead of "Last active sensor", the proxy will fall back to that default after a restart even if you had switched to a different preset earlier.
 - **Humidity Fallback & Preset Switching**: Switching presets requires the target preset's temperature sensor to be online and valid. If only the optional paired humidity sensor is offline, preset activation succeeds, and `current_humidity` falls back to the physical thermostat's internal reading.
-- **Humidity Overdrive** engages only when the active preset has a paired remote humidity sensor (all-or-nothing rule). The proxy will not trigger humidity overdrive using only the physical thermostat's built-in humidity reading for a preset that lacks an explicit humidity binding.
+- **Humidity Overdrive** engages only in dedicated `COOL` mode when the active preset has a paired remote humidity sensor (all-or-nothing rule). It is disabled in `HEAT_COOL` and `AUTO` dual-setpoint modes to prevent setpoint conflicts and short-cycling, and will not trigger using only the physical thermostat's built-in humidity reading for a preset that lacks an explicit humidity binding.
 
 
 ## Contributing
