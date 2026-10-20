@@ -119,6 +119,339 @@ def _get_overdrive_offset_selector() -> selector.NumberSelector:
     )
 
 
+def _temperature_entity_selector() -> selector.EntitySelector:
+    """Build the temperature entity selector."""
+    return selector.EntitySelector(
+        selector.EntitySelectorConfig(
+            domain=["sensor", "climate", "number"],
+            device_class="temperature",
+        )
+    )
+
+
+def _humidity_entity_selector() -> selector.EntitySelector:
+    """Build the humidity entity selector."""
+    return selector.EntitySelector(
+        selector.EntitySelectorConfig(
+            domain=["sensor"],
+            device_class="humidity",
+        )
+    )
+
+
+def _validate_sensor_submission(
+    sensors: list[dict[str, Any]],
+    physical_sensor_name: str,
+    sensor_name: str,
+    entity_id: str,
+    humidity_entity_id: str | None,
+    exclude_name: str | None = None,
+) -> str | None:
+    """Validate submitted sensor attributes for collisions."""
+    reserved_names = {
+        PHYSICAL_SENSOR_NAME.lower(),
+        physical_sensor_name.lower(),
+    }
+    if sensor_name.lower() in reserved_names:
+        return "reserved_sensor_name"
+
+    other_sensors = (
+        [s for s in sensors if s[CONF_SENSOR_NAME] != exclude_name]
+        if exclude_name is not None
+        else sensors
+    )
+
+    if any(sensor_name == sensor[CONF_SENSOR_NAME] for sensor in other_sensors):
+        return "duplicate_sensor_name"
+
+    if any(entity_id == sensor[CONF_SENSOR_ENTITY_ID] for sensor in other_sensors) or (
+        humidity_entity_id
+        and any(
+            humidity_entity_id == sensor.get(CONF_SENSOR_HUMIDITY_ENTITY_ID)
+            for sensor in other_sensors
+        )
+    ):
+        return "duplicate_sensor_entity"
+
+    return None
+
+
+def _extract_entry_runtime_settings(
+    entry: config_entries.ConfigEntry,
+) -> dict[str, Any]:
+    """Extract runtime settings from a config entry, merging options over data."""
+    combined = {**entry.data, **entry.options}
+    default_sensor = combined.get(CONF_DEFAULT_SENSOR)
+    use_last_active = combined.get(CONF_USE_LAST_ACTIVE_SENSOR, False)
+    if default_sensor == DEFAULT_SENSOR_LAST_ACTIVE:
+        use_last_active = True
+        default_sensor = None
+
+    return {
+        CONF_DEFAULT_SENSOR: default_sensor,
+        CONF_USE_LAST_ACTIVE_SENSOR: use_last_active,
+        CONF_COOLDOWN_PERIOD: combined.get(
+            CONF_COOLDOWN_PERIOD, DEFAULT_COOLDOWN_PERIOD
+        ),
+        CONF_MIN_TEMP: combined.get(CONF_MIN_TEMP),
+        CONF_MAX_TEMP: combined.get(CONF_MAX_TEMP),
+        CONF_MAX_SYNC_OFFSET: combined.get(CONF_MAX_SYNC_OFFSET),
+        CONF_DISABLE_AUTO_SWITCH: combined.get(
+            CONF_DISABLE_AUTO_SWITCH, DEFAULT_DISABLE_AUTO_SWITCH
+        ),
+        CONF_PRESERVE_VIRTUAL_TARGET: combined.get(
+            CONF_PRESERVE_VIRTUAL_TARGET, DEFAULT_PRESERVE_VIRTUAL_TARGET
+        ),
+        CONF_SENSOR_CHANGE_THRESHOLD: combined.get(
+            CONF_SENSOR_CHANGE_THRESHOLD, DEFAULT_SENSOR_CHANGE_THRESHOLD
+        ),
+        CONF_MAX_HUMIDITY_OVERCOOL: combined.get(
+            CONF_MAX_HUMIDITY_OVERCOOL, DEFAULT_MAX_HUMIDITY_OVERCOOL
+        ),
+        CONF_DEFAULT_TARGET_HUMIDITY: combined.get(
+            CONF_DEFAULT_TARGET_HUMIDITY, DEFAULT_TARGET_HUMIDITY
+        ),
+        CONF_MIN_DUAL_TEMP_SPREAD: combined.get(CONF_MIN_DUAL_TEMP_SPREAD),
+        CONF_OVERDRIVE_OFFSET: combined.get(
+            CONF_OVERDRIVE_OFFSET, DEFAULT_OVERDRIVE_OFFSET
+        ),
+    }
+
+
+def _parse_and_validate_runtime_input(
+    user_input: dict[str, Any],
+    available_default_options: list[str | None],
+    fallback_disable_auto_switch: bool,
+    fallback_preserve_virtual_target: bool,
+) -> tuple[dict[str, Any], str | None]:
+    """Parse and validate submitted runtime settings."""
+    default_sensor = user_input.get(CONF_DEFAULT_SENSOR)
+    if default_sensor and default_sensor not in (
+        *available_default_options,
+        DEFAULT_SENSOR_LAST_ACTIVE,
+    ):
+        return {}, "invalid_default_sensor"
+
+    min_temp = user_input.get(CONF_MIN_TEMP) or None
+    max_temp = user_input.get(CONF_MAX_TEMP) or None
+    if min_temp is not None and max_temp is not None and min_temp >= max_temp:
+        return {}, "invalid_temp_range"
+
+    data: dict[str, Any] = {}
+    if default_sensor == DEFAULT_SENSOR_LAST_ACTIVE:
+        data[CONF_DEFAULT_SENSOR] = DEFAULT_SENSOR_LAST_ACTIVE
+        data[CONF_USE_LAST_ACTIVE_SENSOR] = True
+    else:
+        if default_sensor:
+            data[CONF_DEFAULT_SENSOR] = default_sensor
+        data[CONF_USE_LAST_ACTIVE_SENSOR] = False
+
+    data[CONF_COOLDOWN_PERIOD] = user_input.get(
+        CONF_COOLDOWN_PERIOD, DEFAULT_COOLDOWN_PERIOD
+    )
+    data[CONF_MIN_TEMP] = min_temp
+    data[CONF_MAX_TEMP] = max_temp
+    data[CONF_MAX_SYNC_OFFSET] = user_input.get(CONF_MAX_SYNC_OFFSET) or None
+
+    disable_auto_switch, preserve_virtual_target = _target_change_flags_from_behavior(
+        user_input.get(
+            CONF_PHYSICAL_TARGET_CHANGE_BEHAVIOR,
+            _target_change_behavior_from_flags(
+                fallback_disable_auto_switch,
+                fallback_preserve_virtual_target,
+            ),
+        )
+    )
+    data[CONF_DISABLE_AUTO_SWITCH] = disable_auto_switch
+    data[CONF_PRESERVE_VIRTUAL_TARGET] = preserve_virtual_target
+    data[CONF_SENSOR_CHANGE_THRESHOLD] = (
+        user_input.get(CONF_SENSOR_CHANGE_THRESHOLD, DEFAULT_SENSOR_CHANGE_THRESHOLD)
+        if user_input.get(CONF_SENSOR_CHANGE_THRESHOLD) is not None
+        else DEFAULT_SENSOR_CHANGE_THRESHOLD
+    )
+    data[CONF_MAX_HUMIDITY_OVERCOOL] = (
+        user_input.get(CONF_MAX_HUMIDITY_OVERCOOL, DEFAULT_MAX_HUMIDITY_OVERCOOL)
+        if user_input.get(CONF_MAX_HUMIDITY_OVERCOOL) is not None
+        else DEFAULT_MAX_HUMIDITY_OVERCOOL
+    )
+    data[CONF_DEFAULT_TARGET_HUMIDITY] = (
+        user_input.get(CONF_DEFAULT_TARGET_HUMIDITY, DEFAULT_TARGET_HUMIDITY)
+        if user_input.get(CONF_DEFAULT_TARGET_HUMIDITY) is not None
+        else DEFAULT_TARGET_HUMIDITY
+    )
+    data[CONF_MIN_DUAL_TEMP_SPREAD] = user_input.get(CONF_MIN_DUAL_TEMP_SPREAD) or None
+    data[CONF_OVERDRIVE_OFFSET] = _coerce_overdrive_offset(user_input)
+
+    return data, None
+
+
+def _build_runtime_settings_schema(
+    *,
+    settings: dict[str, Any],
+    default_sensor_options: list[str] | None = None,
+    default_sensor_value: str | None = None,
+    default_sensor_first: bool = False,
+    physical_sensor_name: str | None = None,
+) -> dict[Any, Any]:
+    """Build voluptuous schema fields for runtime settings."""
+    schema_fields: dict[Any, Any] = {}
+
+    if physical_sensor_name is not None:
+        schema_fields[
+            vol.Optional(CONF_PHYSICAL_SENSOR_NAME, default=physical_sensor_name)
+        ] = selector.TextSelector(
+            selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
+        )
+
+    default_sensor_field: tuple[Any, Any] | None = None
+    if default_sensor_options:
+        default_options = [
+            selector.SelectOptionDict(value=option, label=option)
+            for option in default_sensor_options
+        ]
+        default_options.append(
+            selector.SelectOptionDict(
+                value=DEFAULT_SENSOR_LAST_ACTIVE,
+                label="Last active sensor",
+            )
+        )
+        selector_config = selector.SelectSelectorConfig(options=default_options)
+        if default_sensor_value is not None:
+            default_sensor_field = (
+                vol.Optional(CONF_DEFAULT_SENSOR, default=default_sensor_value),
+                selector.SelectSelector(selector_config),
+            )
+        else:
+            default_sensor_field = (
+                vol.Optional(CONF_DEFAULT_SENSOR),
+                selector.SelectSelector(selector_config),
+            )
+
+    if default_sensor_first and default_sensor_field is not None:
+        schema_fields[default_sensor_field[0]] = default_sensor_field[1]
+
+    schema_fields[
+        vol.Optional(
+            CONF_COOLDOWN_PERIOD,
+            default=settings.get(CONF_COOLDOWN_PERIOD, DEFAULT_COOLDOWN_PERIOD),
+        )
+    ] = selector.NumberSelector(
+        selector.NumberSelectorConfig(
+            min=0,
+            max=3600,
+            unit_of_measurement="seconds",
+            mode=selector.NumberSelectorMode.BOX,
+        )
+    )
+
+    number_selector = selector.NumberSelector(
+        selector.NumberSelectorConfig(
+            max=100, step=0.5, mode=selector.NumberSelectorMode.BOX
+        )
+    )
+
+    threshold_selector = selector.NumberSelector(
+        selector.NumberSelectorConfig(
+            min=0.0, max=10.0, step=0.1, mode=selector.NumberSelectorMode.BOX
+        )
+    )
+
+    min_temp = settings.get(CONF_MIN_TEMP)
+    max_temp = settings.get(CONF_MAX_TEMP)
+    max_sync_offset = settings.get(CONF_MAX_SYNC_OFFSET)
+
+    schema_fields[
+        vol.Optional(CONF_MIN_TEMP, default=min_temp if min_temp is not None else 0)
+    ] = number_selector
+    schema_fields[
+        vol.Optional(CONF_MAX_TEMP, default=max_temp if max_temp is not None else 0)
+    ] = number_selector
+    schema_fields[
+        vol.Optional(
+            CONF_MAX_SYNC_OFFSET,
+            default=(
+                max_sync_offset
+                if max_sync_offset is not None
+                else DEFAULT_MAX_SYNC_OFFSET
+            ),
+        )
+    ] = number_selector
+    schema_fields[
+        vol.Optional(
+            CONF_SENSOR_CHANGE_THRESHOLD,
+            default=settings.get(
+                CONF_SENSOR_CHANGE_THRESHOLD, DEFAULT_SENSOR_CHANGE_THRESHOLD
+            ),
+        )
+    ] = threshold_selector
+
+    if not default_sensor_first and default_sensor_field is not None:
+        schema_fields[default_sensor_field[0]] = default_sensor_field[1]
+
+    target_change_behavior = _target_change_behavior_from_flags(
+        settings.get(CONF_DISABLE_AUTO_SWITCH, DEFAULT_DISABLE_AUTO_SWITCH),
+        settings.get(CONF_PRESERVE_VIRTUAL_TARGET, DEFAULT_PRESERVE_VIRTUAL_TARGET),
+    )
+
+    max_overcool = settings.get(CONF_MAX_HUMIDITY_OVERCOOL)
+    default_humidity = settings.get(CONF_DEFAULT_TARGET_HUMIDITY)
+    min_spread = settings.get(CONF_MIN_DUAL_TEMP_SPREAD)
+    overdrive = settings.get(CONF_OVERDRIVE_OFFSET)
+
+    schema_fields[
+        vol.Optional(
+            CONF_MAX_HUMIDITY_OVERCOOL,
+            default=(
+                max_overcool
+                if max_overcool is not None
+                else DEFAULT_MAX_HUMIDITY_OVERCOOL
+            ),
+        )
+    ] = selector.NumberSelector(
+        selector.NumberSelectorConfig(
+            min=0.0, max=10.0, step=0.5, mode=selector.NumberSelectorMode.BOX
+        )
+    )
+    schema_fields[
+        vol.Optional(
+            CONF_DEFAULT_TARGET_HUMIDITY,
+            default=(
+                default_humidity
+                if default_humidity is not None
+                else DEFAULT_TARGET_HUMIDITY
+            ),
+        )
+    ] = selector.NumberSelector(
+        selector.NumberSelectorConfig(
+            min=30, max=99, step=1, mode=selector.NumberSelectorMode.BOX
+        )
+    )
+    schema_fields[
+        vol.Optional(
+            CONF_MIN_DUAL_TEMP_SPREAD,
+            default=min_spread if min_spread is not None else 0.0,
+        )
+    ] = selector.NumberSelector(
+        selector.NumberSelectorConfig(
+            min=0.0, max=15.0, step=0.5, mode=selector.NumberSelectorMode.BOX
+        )
+    )
+    schema_fields[
+        vol.Optional(
+            CONF_OVERDRIVE_OFFSET,
+            default=(overdrive if overdrive is not None else DEFAULT_OVERDRIVE_OFFSET),
+        )
+    ] = _get_overdrive_offset_selector()
+    schema_fields[
+        vol.Optional(
+            CONF_PHYSICAL_TARGET_CHANGE_BEHAVIOR,
+            default=target_change_behavior,
+        )
+    ] = _target_change_behavior_selector()
+
+    return schema_fields
+
+
 class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Thermostat Proxy."""
 
@@ -210,45 +543,23 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             }
             for sensor in entry.data.get(CONF_SENSORS, [])
         ]
-        self._default_sensor = entry.data.get(CONF_DEFAULT_SENSOR)
         self._physical_sensor_name = entry.data.get(
             CONF_PHYSICAL_SENSOR_NAME, PHYSICAL_SENSOR_NAME
         )
-        self._cooldown_period = entry.data.get(
-            CONF_COOLDOWN_PERIOD, DEFAULT_COOLDOWN_PERIOD
-        )
-        self._min_temp = entry.data.get(CONF_MIN_TEMP)
-        self._max_temp = entry.data.get(CONF_MAX_TEMP)
-        self._max_sync_offset = entry.data.get(CONF_MAX_SYNC_OFFSET)
-        self._disable_auto_switch = entry.options.get(
-            CONF_DISABLE_AUTO_SWITCH,
-            entry.data.get(CONF_DISABLE_AUTO_SWITCH, DEFAULT_DISABLE_AUTO_SWITCH),
-        )
-        self._preserve_virtual_target = entry.options.get(
-            CONF_PRESERVE_VIRTUAL_TARGET,
-            entry.data.get(
-                CONF_PRESERVE_VIRTUAL_TARGET, DEFAULT_PRESERVE_VIRTUAL_TARGET
-            ),
-        )
-        self._sensor_change_threshold = entry.data.get(
-            CONF_SENSOR_CHANGE_THRESHOLD, DEFAULT_SENSOR_CHANGE_THRESHOLD
-        )
-        self._max_humidity_overcool = entry.data.get(
-            CONF_MAX_HUMIDITY_OVERCOOL, DEFAULT_MAX_HUMIDITY_OVERCOOL
-        )
-        self._default_target_humidity = entry.data.get(
-            CONF_DEFAULT_TARGET_HUMIDITY, DEFAULT_TARGET_HUMIDITY
-        )
-        self._min_dual_temp_spread = entry.data.get(CONF_MIN_DUAL_TEMP_SPREAD)
-        self._overdrive_offset = entry.data.get(
-            CONF_OVERDRIVE_OFFSET, DEFAULT_OVERDRIVE_OFFSET
-        )
-        self._use_last_active_sensor = entry.data.get(
-            CONF_USE_LAST_ACTIVE_SENSOR, False
-        )
-        if self._default_sensor == DEFAULT_SENSOR_LAST_ACTIVE:
-            self._use_last_active_sensor = True
-            self._default_sensor = None
+        settings = _extract_entry_runtime_settings(entry)
+        self._default_sensor = settings[CONF_DEFAULT_SENSOR]
+        self._use_last_active_sensor = settings[CONF_USE_LAST_ACTIVE_SENSOR]
+        self._cooldown_period = settings[CONF_COOLDOWN_PERIOD]
+        self._min_temp = settings[CONF_MIN_TEMP]
+        self._max_temp = settings[CONF_MAX_TEMP]
+        self._max_sync_offset = settings[CONF_MAX_SYNC_OFFSET]
+        self._disable_auto_switch = settings[CONF_DISABLE_AUTO_SWITCH]
+        self._preserve_virtual_target = settings[CONF_PRESERVE_VIRTUAL_TARGET]
+        self._sensor_change_threshold = settings[CONF_SENSOR_CHANGE_THRESHOLD]
+        self._max_humidity_overcool = settings[CONF_MAX_HUMIDITY_OVERCOOL]
+        self._default_target_humidity = settings[CONF_DEFAULT_TARGET_HUMIDITY]
+        self._min_dual_temp_spread = settings[CONF_MIN_DUAL_TEMP_SPREAD]
+        self._overdrive_offset = settings[CONF_OVERDRIVE_OFFSET]
 
         errors: dict[str, str] = {}
         if user_input is not None:
@@ -329,26 +640,15 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             entity_id = user_input[CONF_SENSOR_ENTITY_ID]
             humidity_entity_id = user_input.get(CONF_SENSOR_HUMIDITY_ENTITY_ID)
 
-            reserved_names = {
-                PHYSICAL_SENSOR_NAME.lower(),
-                self._physical_sensor_name.lower(),
-            }
-            if sensor_name.lower() in reserved_names:
-                errors["base"] = "reserved_sensor_name"
-            elif any(
-                sensor_name == sensor[CONF_SENSOR_NAME] for sensor in self._sensors
-            ):
-                errors["base"] = "duplicate_sensor_name"
-            elif any(
-                entity_id == sensor[CONF_SENSOR_ENTITY_ID] for sensor in self._sensors
-            ) or (
-                humidity_entity_id
-                and any(
-                    humidity_entity_id == sensor.get(CONF_SENSOR_HUMIDITY_ENTITY_ID)
-                    for sensor in self._sensors
-                )
-            ):
-                errors["base"] = "duplicate_sensor_entity"
+            error = _validate_sensor_submission(
+                sensors=self._sensors,
+                physical_sensor_name=self._physical_sensor_name,
+                sensor_name=sensor_name,
+                entity_id=entity_id,
+                humidity_entity_id=humidity_entity_id,
+            )
+            if error:
+                errors["base"] = error
             else:
                 self._sensors.append(
                     {
@@ -366,18 +666,10 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Required(CONF_SENSOR_NAME): selector.TextSelector(
                     selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
                 ),
-                vol.Required(CONF_SENSOR_ENTITY_ID): selector.EntitySelector(
-                    selector.EntitySelectorConfig(
-                        domain=["sensor", "climate", "number"],
-                        device_class="temperature",
-                    )
-                ),
-                vol.Optional(CONF_SENSOR_HUMIDITY_ENTITY_ID): selector.EntitySelector(
-                    selector.EntitySelectorConfig(
-                        domain=["sensor"],
-                        device_class="humidity",
-                    )
-                ),
+                vol.Required(CONF_SENSOR_ENTITY_ID): _temperature_entity_selector(),
+                vol.Optional(
+                    CONF_SENSOR_HUMIDITY_ENTITY_ID
+                ): _humidity_entity_selector(),
                 vol.Optional(CONF_ADD_ANOTHER, default=True): cv.boolean,
             }
         )
@@ -469,31 +761,16 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             entity_id = user_input[CONF_SENSOR_ENTITY_ID]
             humidity_entity_id = user_input.get(CONF_SENSOR_HUMIDITY_ENTITY_ID)
 
-            reserved_names = {
-                PHYSICAL_SENSOR_NAME.lower(),
-                self._physical_sensor_name.lower(),
-            }
-            if sensor_name.lower() in reserved_names:
-                errors["base"] = "reserved_sensor_name"
-            elif any(
-                sensor_name == sensor[CONF_SENSOR_NAME]
-                for sensor in self._sensors
-                if sensor[CONF_SENSOR_NAME] != target
-            ):
-                errors["base"] = "duplicate_sensor_name"
-            elif any(
-                entity_id == sensor[CONF_SENSOR_ENTITY_ID]
-                for sensor in self._sensors
-                if sensor[CONF_SENSOR_NAME] != target
-            ) or (
-                humidity_entity_id
-                and any(
-                    humidity_entity_id == sensor.get(CONF_SENSOR_HUMIDITY_ENTITY_ID)
-                    for sensor in self._sensors
-                    if sensor[CONF_SENSOR_NAME] != target
-                )
-            ):
-                errors["base"] = "duplicate_sensor_entity"
+            error = _validate_sensor_submission(
+                sensors=self._sensors,
+                physical_sensor_name=self._physical_sensor_name,
+                sensor_name=sensor_name,
+                entity_id=entity_id,
+                humidity_entity_id=humidity_entity_id,
+                exclude_name=target,
+            )
+            if error:
+                errors["base"] = error
             else:
                 target_sensor[CONF_SENSOR_NAME] = sensor_name
                 target_sensor[CONF_SENSOR_ENTITY_ID] = entity_id
@@ -512,12 +789,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             vol.Required(
                 CONF_SENSOR_ENTITY_ID,
                 default=target_sensor[CONF_SENSOR_ENTITY_ID],
-            ): selector.EntitySelector(
-                selector.EntitySelectorConfig(
-                    domain=["sensor", "climate", "number"],
-                    device_class="temperature",
-                )
-            ),
+            ): _temperature_entity_selector(),
         }
         current_humidity = target_sensor.get(CONF_SENSOR_HUMIDITY_ENTITY_ID)
         if current_humidity:
@@ -526,20 +798,10 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_SENSOR_HUMIDITY_ENTITY_ID,
                     default=current_humidity,
                 )
-            ] = selector.EntitySelector(
-                selector.EntitySelectorConfig(
-                    domain=["sensor"],
-                    device_class="humidity",
-                )
-            )
+            ] = _humidity_entity_selector()
         else:
             schema_dict[vol.Optional(CONF_SENSOR_HUMIDITY_ENTITY_ID)] = (
-                selector.EntitySelector(
-                    selector.EntitySelectorConfig(
-                        domain=["sensor"],
-                        device_class="humidity",
-                    )
-                )
+                _humidity_entity_selector()
             )
 
         data_schema = vol.Schema(schema_dict)
@@ -561,13 +823,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if current_physical_name not in available_default_options:
             available_default_options.append(current_physical_name)
 
-        default_sensor = (
-            DEFAULT_SENSOR_LAST_ACTIVE
-            if self._use_last_active_sensor
-            else self._default_sensor
-        )
         if user_input is not None:
-            default_sensor = user_input.get(CONF_DEFAULT_SENSOR)
             submitted_physical_name = user_input.get(
                 CONF_PHYSICAL_SENSOR_NAME, current_physical_name
             )
@@ -575,284 +831,133 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 submitted_physical_name.strip() if submitted_physical_name else ""
             ) or PHYSICAL_SENSOR_NAME
 
-            cooldown_period = user_input.get(
-                CONF_COOLDOWN_PERIOD, DEFAULT_COOLDOWN_PERIOD
-            )
-            min_temp = user_input.get(CONF_MIN_TEMP) or None
-            max_temp = user_input.get(CONF_MAX_TEMP) or None
-            max_sync_offset = user_input.get(CONF_MAX_SYNC_OFFSET) or None
-            disable_auto_switch, preserve_virtual_target = (
-                _target_change_flags_from_behavior(
-                    user_input.get(
-                        CONF_PHYSICAL_TARGET_CHANGE_BEHAVIOR,
-                        _target_change_behavior_from_flags(
-                            self._disable_auto_switch,
-                            self._preserve_virtual_target,
-                        ),
-                    )
-                )
-            )
-            sensor_change_threshold = (
-                user_input.get(
-                    CONF_SENSOR_CHANGE_THRESHOLD, DEFAULT_SENSOR_CHANGE_THRESHOLD
-                )
-                if user_input.get(CONF_SENSOR_CHANGE_THRESHOLD) is not None
-                else DEFAULT_SENSOR_CHANGE_THRESHOLD
-            )
-            max_humidity_overcool = (
-                user_input.get(
-                    CONF_MAX_HUMIDITY_OVERCOOL, DEFAULT_MAX_HUMIDITY_OVERCOOL
-                )
-                if user_input.get(CONF_MAX_HUMIDITY_OVERCOOL) is not None
-                else DEFAULT_MAX_HUMIDITY_OVERCOOL
-            )
-            default_target_humidity = (
-                user_input.get(CONF_DEFAULT_TARGET_HUMIDITY, DEFAULT_TARGET_HUMIDITY)
-                if user_input.get(CONF_DEFAULT_TARGET_HUMIDITY) is not None
-                else DEFAULT_TARGET_HUMIDITY
-            )
-            min_dual_temp_spread = user_input.get(CONF_MIN_DUAL_TEMP_SPREAD) or None
-            overdrive_offset = _coerce_overdrive_offset(user_input)
-
             if any(
                 physical_sensor_name.lower() == sensor_name.lower()
                 for sensor_name in sensor_names
             ):
                 errors["base"] = "physical_name_conflict"
-            elif default_sensor and default_sensor not in (
-                *available_default_options,
-                DEFAULT_SENSOR_LAST_ACTIVE,
-            ):
-                errors["base"] = "invalid_default_sensor"
-            elif min_temp is not None and max_temp is not None and min_temp >= max_temp:
-                errors["base"] = "invalid_temp_range"
             else:
-                if (
-                    default_sensor
-                    and default_sensor == current_physical_name
-                    and physical_sensor_name != current_physical_name
-                ):
-                    default_sensor = physical_sensor_name
-
-                use_last_active_sensor = default_sensor == DEFAULT_SENSOR_LAST_ACTIVE
-                self._default_sensor = (
-                    None if use_last_active_sensor else default_sensor
+                runtime_data, error = _parse_and_validate_runtime_input(
+                    user_input,
+                    available_default_options,
+                    self._disable_auto_switch,
+                    self._preserve_virtual_target,
                 )
-                self._physical_sensor_name = physical_sensor_name
-                self._cooldown_period = cooldown_period
-                self._min_temp = min_temp
-                self._max_temp = max_temp
-                self._max_sync_offset = max_sync_offset
-                self._disable_auto_switch = disable_auto_switch
-                self._preserve_virtual_target = preserve_virtual_target
-                self._sensor_change_threshold = sensor_change_threshold
-                self._max_humidity_overcool = max_humidity_overcool
-                self._default_target_humidity = default_target_humidity
-                self._min_dual_temp_spread = min_dual_temp_spread
-                self._overdrive_offset = overdrive_offset
-                self._use_last_active_sensor = use_last_active_sensor
-
-                sensor_names_with_physical = list(sensor_names)
-                if physical_sensor_name not in sensor_names_with_physical:
-                    sensor_names_with_physical.append(physical_sensor_name)
-
-                data = {
-                    **self._data,
-                    CONF_SENSORS: self._sensors,
-                    CONF_PHYSICAL_SENSOR_NAME: self._physical_sensor_name,
-                    CONF_COOLDOWN_PERIOD: self._cooldown_period,
-                    CONF_USE_LAST_ACTIVE_SENSOR: self._use_last_active_sensor,
-                    CONF_MIN_TEMP: min_temp,
-                    CONF_MAX_TEMP: max_temp,
-                    CONF_MAX_SYNC_OFFSET: max_sync_offset,
-                    CONF_DISABLE_AUTO_SWITCH: disable_auto_switch,
-                    CONF_PRESERVE_VIRTUAL_TARGET: preserve_virtual_target,
-                    CONF_SENSOR_CHANGE_THRESHOLD: sensor_change_threshold,
-                    CONF_MAX_HUMIDITY_OVERCOOL: max_humidity_overcool,
-                    CONF_DEFAULT_TARGET_HUMIDITY: default_target_humidity,
-                    CONF_MIN_DUAL_TEMP_SPREAD: min_dual_temp_spread,
-                    CONF_OVERDRIVE_OFFSET: overdrive_offset,
-                }
-                if self._use_last_active_sensor:
-                    data[CONF_DEFAULT_SENSOR] = DEFAULT_SENSOR_LAST_ACTIVE
-                elif default_sensor:
-                    data[CONF_DEFAULT_SENSOR] = default_sensor
-                if self._reconfigure_entry:
-                    options = dict(self._reconfigure_entry.options)
-                    # Sync shared parameters to ensure reconfigured values are not overridden by stale options
-                    for key in (
-                        CONF_DEFAULT_SENSOR,
-                        CONF_COOLDOWN_PERIOD,
-                        CONF_MIN_TEMP,
-                        CONF_MAX_TEMP,
-                        CONF_MAX_SYNC_OFFSET,
-                        CONF_DISABLE_AUTO_SWITCH,
-                        CONF_PRESERVE_VIRTUAL_TARGET,
-                        CONF_SENSOR_CHANGE_THRESHOLD,
-                        CONF_USE_LAST_ACTIVE_SENSOR,
-                        CONF_MAX_HUMIDITY_OVERCOOL,
-                        CONF_DEFAULT_TARGET_HUMIDITY,
-                        CONF_MIN_DUAL_TEMP_SPREAD,
-                        CONF_OVERDRIVE_OFFSET,
+                if error:
+                    errors["base"] = error
+                else:
+                    if (
+                        runtime_data.get(CONF_DEFAULT_SENSOR) == current_physical_name
+                        and physical_sensor_name != current_physical_name
                     ):
-                        if key in options:
-                            options[key] = data.get(key)
+                        runtime_data[CONF_DEFAULT_SENSOR] = physical_sensor_name
 
-                    if data.get(CONF_NAME) != self._reconfigure_entry.title:
-                        self.hass.config_entries.async_update_entry(
-                            self._reconfigure_entry, title=data[CONF_NAME]
-                        )
-                    return self.async_update_reload_and_abort(
-                        self._reconfigure_entry,
-                        data=data,
-                        options=options,
-                        reason="reconfigure_successful",
+                    self._default_sensor = (
+                        None
+                        if runtime_data[CONF_USE_LAST_ACTIVE_SENSOR]
+                        else runtime_data.get(CONF_DEFAULT_SENSOR)
                     )
-                return self.async_create_entry(title=self._data[CONF_NAME], data=data)
+                    self._physical_sensor_name = physical_sensor_name
+                    self._cooldown_period = runtime_data[CONF_COOLDOWN_PERIOD]
+                    self._min_temp = runtime_data[CONF_MIN_TEMP]
+                    self._max_temp = runtime_data[CONF_MAX_TEMP]
+                    self._max_sync_offset = runtime_data[CONF_MAX_SYNC_OFFSET]
+                    self._disable_auto_switch = runtime_data[CONF_DISABLE_AUTO_SWITCH]
+                    self._preserve_virtual_target = runtime_data[
+                        CONF_PRESERVE_VIRTUAL_TARGET
+                    ]
+                    self._sensor_change_threshold = runtime_data[
+                        CONF_SENSOR_CHANGE_THRESHOLD
+                    ]
+                    self._max_humidity_overcool = runtime_data[
+                        CONF_MAX_HUMIDITY_OVERCOOL
+                    ]
+                    self._default_target_humidity = runtime_data[
+                        CONF_DEFAULT_TARGET_HUMIDITY
+                    ]
+                    self._min_dual_temp_spread = runtime_data[CONF_MIN_DUAL_TEMP_SPREAD]
+                    self._overdrive_offset = runtime_data[CONF_OVERDRIVE_OFFSET]
+                    self._use_last_active_sensor = runtime_data[
+                        CONF_USE_LAST_ACTIVE_SENSOR
+                    ]
 
-        schema_fields: dict[Any, Any] = {
-            vol.Optional(
-                CONF_PHYSICAL_SENSOR_NAME, default=self._physical_sensor_name
-            ): selector.TextSelector(
-                selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
-            ),
-            vol.Optional(
-                CONF_COOLDOWN_PERIOD, default=self._cooldown_period
-            ): selector.NumberSelector(
-                selector.NumberSelectorConfig(
-                    min=0,
-                    max=3600,
-                    unit_of_measurement="seconds",
-                    mode=selector.NumberSelectorMode.BOX,
-                )
-            ),
+                    data = {
+                        **self._data,
+                        CONF_SENSORS: self._sensors,
+                        CONF_PHYSICAL_SENSOR_NAME: self._physical_sensor_name,
+                        **runtime_data,
+                    }
+
+                    if self._reconfigure_entry:
+                        options = dict(self._reconfigure_entry.options)
+                        # Sync shared parameters to ensure reconfigured values are not overridden by stale options
+                        for key in (
+                            CONF_DEFAULT_SENSOR,
+                            CONF_COOLDOWN_PERIOD,
+                            CONF_MIN_TEMP,
+                            CONF_MAX_TEMP,
+                            CONF_MAX_SYNC_OFFSET,
+                            CONF_DISABLE_AUTO_SWITCH,
+                            CONF_PRESERVE_VIRTUAL_TARGET,
+                            CONF_SENSOR_CHANGE_THRESHOLD,
+                            CONF_USE_LAST_ACTIVE_SENSOR,
+                            CONF_MAX_HUMIDITY_OVERCOOL,
+                            CONF_DEFAULT_TARGET_HUMIDITY,
+                            CONF_MIN_DUAL_TEMP_SPREAD,
+                            CONF_OVERDRIVE_OFFSET,
+                        ):
+                            if key in options:
+                                options[key] = data.get(key)
+
+                        if data.get(CONF_NAME) != self._reconfigure_entry.title:
+                            self.hass.config_entries.async_update_entry(
+                                self._reconfigure_entry, title=data[CONF_NAME]
+                            )
+                        return self.async_update_reload_and_abort(
+                            self._reconfigure_entry,
+                            data=data,
+                            options=options,
+                            reason="reconfigure_successful",
+                        )
+                    return self.async_create_entry(
+                        title=self._data[CONF_NAME], data=data
+                    )
+
+        current_settings = {
+            CONF_COOLDOWN_PERIOD: self._cooldown_period,
+            CONF_MIN_TEMP: self._min_temp,
+            CONF_MAX_TEMP: self._max_temp,
+            CONF_MAX_SYNC_OFFSET: self._max_sync_offset,
+            CONF_DISABLE_AUTO_SWITCH: self._disable_auto_switch,
+            CONF_PRESERVE_VIRTUAL_TARGET: self._preserve_virtual_target,
+            CONF_SENSOR_CHANGE_THRESHOLD: self._sensor_change_threshold,
+            CONF_MAX_HUMIDITY_OVERCOOL: self._max_humidity_overcool,
+            CONF_DEFAULT_TARGET_HUMIDITY: self._default_target_humidity,
+            CONF_MIN_DUAL_TEMP_SPREAD: self._min_dual_temp_spread,
+            CONF_OVERDRIVE_OFFSET: self._overdrive_offset,
         }
 
-        number_selector = selector.NumberSelector(
-            selector.NumberSelectorConfig(
-                max=100, step=0.5, mode=selector.NumberSelectorMode.BOX
+        default_sensor = (
+            user_input.get(CONF_DEFAULT_SENSOR)
+            if user_input is not None
+            else (
+                DEFAULT_SENSOR_LAST_ACTIVE
+                if self._use_last_active_sensor
+                else self._default_sensor
             )
         )
 
-        threshold_selector = selector.NumberSelector(
-            selector.NumberSelectorConfig(
-                min=0.0, max=10.0, step=0.1, mode=selector.NumberSelectorMode.BOX
-            )
+        schema_fields = _build_runtime_settings_schema(
+            settings=current_settings,
+            default_sensor_options=available_default_options if sensor_names else None,
+            default_sensor_value=default_sensor,
+            default_sensor_first=False,
+            physical_sensor_name=self._physical_sensor_name,
         )
-
-        # Show current values as defaults during reconfigure (0 = disabled)
-        min_temp_default = self._min_temp if self._min_temp is not None else 0
-        max_temp_default = self._max_temp if self._max_temp is not None else 0
-        max_sync_offset_default = (
-            self._max_sync_offset
-            if self._max_sync_offset is not None
-            else DEFAULT_MAX_SYNC_OFFSET
-        )
-
-        schema_fields[vol.Optional(CONF_MIN_TEMP, default=min_temp_default)] = (
-            number_selector
-        )
-        schema_fields[vol.Optional(CONF_MAX_TEMP, default=max_temp_default)] = (
-            number_selector
-        )
-        schema_fields[
-            vol.Optional(CONF_MAX_SYNC_OFFSET, default=max_sync_offset_default)
-        ] = number_selector
-        schema_fields[
-            vol.Optional(
-                CONF_SENSOR_CHANGE_THRESHOLD, default=self._sensor_change_threshold
-            )
-        ] = threshold_selector
-
-        if sensor_names:
-            default_options = [
-                selector.SelectOptionDict(value=option, label=option)
-                for option in available_default_options
-            ]
-            default_options.append(
-                selector.SelectOptionDict(
-                    value=DEFAULT_SENSOR_LAST_ACTIVE,
-                    label="Last active sensor",
-                )
-            )
-
-            selector_config = selector.SelectSelectorConfig(options=default_options)
-            if default_sensor:
-                schema_fields[
-                    vol.Optional(CONF_DEFAULT_SENSOR, default=default_sensor)
-                ] = selector.SelectSelector(selector_config)
-            else:
-                schema_fields[vol.Optional(CONF_DEFAULT_SENSOR)] = (
-                    selector.SelectSelector(selector_config)
-                )
-
-        target_change_behavior = _target_change_behavior_from_flags(
-            self._disable_auto_switch, self._preserve_virtual_target
-        )
-        schema_fields[
-            vol.Optional(
-                CONF_MAX_HUMIDITY_OVERCOOL,
-                default=(
-                    self._max_humidity_overcool
-                    if self._max_humidity_overcool is not None
-                    else DEFAULT_MAX_HUMIDITY_OVERCOOL
-                ),
-            )
-        ] = selector.NumberSelector(
-            selector.NumberSelectorConfig(
-                min=0.0, max=10.0, step=0.5, mode=selector.NumberSelectorMode.BOX
-            )
-        )
-        schema_fields[
-            vol.Optional(
-                CONF_DEFAULT_TARGET_HUMIDITY,
-                default=(
-                    self._default_target_humidity
-                    if self._default_target_humidity is not None
-                    else DEFAULT_TARGET_HUMIDITY
-                ),
-            )
-        ] = selector.NumberSelector(
-            selector.NumberSelectorConfig(
-                min=30, max=99, step=1, mode=selector.NumberSelectorMode.BOX
-            )
-        )
-        schema_fields[
-            vol.Optional(
-                CONF_MIN_DUAL_TEMP_SPREAD,
-                default=(
-                    self._min_dual_temp_spread
-                    if self._min_dual_temp_spread is not None
-                    else 0.0
-                ),
-            )
-        ] = selector.NumberSelector(
-            selector.NumberSelectorConfig(
-                min=0.0, max=15.0, step=0.5, mode=selector.NumberSelectorMode.BOX
-            )
-        )
-        schema_fields[
-            vol.Optional(
-                CONF_OVERDRIVE_OFFSET,
-                default=(
-                    self._overdrive_offset
-                    if self._overdrive_offset is not None
-                    else DEFAULT_OVERDRIVE_OFFSET
-                ),
-            )
-        ] = _get_overdrive_offset_selector()
-        schema_fields[
-            vol.Optional(
-                CONF_PHYSICAL_TARGET_CHANGE_BEHAVIOR,
-                default=target_change_behavior,
-            )
-        ] = _target_change_behavior_selector()
-
-        data_schema = vol.Schema(schema_fields)
 
         return self.async_show_form(
             step_id=FINALIZE_STEP,
-            data_schema=data_schema,
+            data_schema=vol.Schema(schema_fields),
             errors=errors,
         )
 
@@ -895,276 +1000,40 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
         if not sensor_names:
             sensor_names = [None]
 
-        current_default = self.config_entry.options.get(
-            CONF_DEFAULT_SENSOR,
-            self.config_entry.data.get(CONF_DEFAULT_SENSOR),
-        )
-        use_last_active_sensor = self.config_entry.options.get(
-            CONF_USE_LAST_ACTIVE_SENSOR,
-            self.config_entry.data.get(CONF_USE_LAST_ACTIVE_SENSOR, False),
-        )
-        current_cooldown = self.config_entry.options.get(
-            CONF_COOLDOWN_PERIOD,
-            self.config_entry.data.get(CONF_COOLDOWN_PERIOD, DEFAULT_COOLDOWN_PERIOD),
-        )
-        current_min_temp = self.config_entry.options.get(
-            CONF_MIN_TEMP,
-            self.config_entry.data.get(CONF_MIN_TEMP),
-        )
-        current_max_temp = self.config_entry.options.get(
-            CONF_MAX_TEMP,
-            self.config_entry.data.get(CONF_MAX_TEMP),
-        )
-        current_max_sync_offset = self.config_entry.options.get(
-            CONF_MAX_SYNC_OFFSET,
-            self.config_entry.data.get(CONF_MAX_SYNC_OFFSET),
-        )
-        current_disable_auto_switch = self.config_entry.options.get(
-            CONF_DISABLE_AUTO_SWITCH,
-            self.config_entry.data.get(
-                CONF_DISABLE_AUTO_SWITCH, DEFAULT_DISABLE_AUTO_SWITCH
-            ),
-        )
-        current_preserve_virtual_target = self.config_entry.options.get(
-            CONF_PRESERVE_VIRTUAL_TARGET,
-            self.config_entry.data.get(
-                CONF_PRESERVE_VIRTUAL_TARGET, DEFAULT_PRESERVE_VIRTUAL_TARGET
-            ),
-        )
-        current_sensor_change_threshold = self.config_entry.options.get(
-            CONF_SENSOR_CHANGE_THRESHOLD,
-            self.config_entry.data.get(
-                CONF_SENSOR_CHANGE_THRESHOLD, DEFAULT_SENSOR_CHANGE_THRESHOLD
-            ),
-        )
-        current_max_humidity_overcool = self.config_entry.options.get(
-            CONF_MAX_HUMIDITY_OVERCOOL,
-            self.config_entry.data.get(
-                CONF_MAX_HUMIDITY_OVERCOOL, DEFAULT_MAX_HUMIDITY_OVERCOOL
-            ),
-        )
-        current_default_target_humidity = self.config_entry.options.get(
-            CONF_DEFAULT_TARGET_HUMIDITY,
-            self.config_entry.data.get(
-                CONF_DEFAULT_TARGET_HUMIDITY, DEFAULT_TARGET_HUMIDITY
-            ),
-        )
-        current_min_dual_temp_spread = self.config_entry.options.get(
-            CONF_MIN_DUAL_TEMP_SPREAD,
-            self.config_entry.data.get(CONF_MIN_DUAL_TEMP_SPREAD),
-        )
-        current_overdrive_offset = self.config_entry.options.get(
-            CONF_OVERDRIVE_OFFSET,
-            self.config_entry.data.get(CONF_OVERDRIVE_OFFSET, DEFAULT_OVERDRIVE_OFFSET),
-        )
-
-        if current_default == DEFAULT_SENSOR_LAST_ACTIVE:
-            use_last_active_sensor = True
-            current_default = None
+        settings = _extract_entry_runtime_settings(self.config_entry)
 
         errors: dict[str, str] = {}
         if user_input is not None:
-            default_sensor = user_input.get(CONF_DEFAULT_SENSOR)
-            min_temp = user_input.get(CONF_MIN_TEMP) or None
-            max_temp = user_input.get(CONF_MAX_TEMP) or None
-            max_sync_offset = user_input.get(CONF_MAX_SYNC_OFFSET) or None
-            disable_auto_switch, preserve_virtual_target = (
-                _target_change_flags_from_behavior(
-                    user_input.get(
-                        CONF_PHYSICAL_TARGET_CHANGE_BEHAVIOR,
-                        _target_change_behavior_from_flags(
-                            current_disable_auto_switch,
-                            current_preserve_virtual_target,
-                        ),
-                    )
-                )
+            data, error = _parse_and_validate_runtime_input(
+                user_input,
+                sensor_names,
+                settings[CONF_DISABLE_AUTO_SWITCH],
+                settings[CONF_PRESERVE_VIRTUAL_TARGET],
             )
-            sensor_change_threshold = (
-                user_input.get(
-                    CONF_SENSOR_CHANGE_THRESHOLD, DEFAULT_SENSOR_CHANGE_THRESHOLD
-                )
-                if user_input.get(CONF_SENSOR_CHANGE_THRESHOLD) is not None
-                else DEFAULT_SENSOR_CHANGE_THRESHOLD
-            )
-            max_humidity_overcool = (
-                user_input.get(
-                    CONF_MAX_HUMIDITY_OVERCOOL, DEFAULT_MAX_HUMIDITY_OVERCOOL
-                )
-                if user_input.get(CONF_MAX_HUMIDITY_OVERCOOL) is not None
-                else DEFAULT_MAX_HUMIDITY_OVERCOOL
-            )
-            default_target_humidity = (
-                user_input.get(CONF_DEFAULT_TARGET_HUMIDITY, DEFAULT_TARGET_HUMIDITY)
-                if user_input.get(CONF_DEFAULT_TARGET_HUMIDITY) is not None
-                else DEFAULT_TARGET_HUMIDITY
-            )
-            overdrive_offset = _coerce_overdrive_offset(user_input)
-
-            if default_sensor and default_sensor not in (
-                *sensor_names,
-                DEFAULT_SENSOR_LAST_ACTIVE,
-            ):
-                errors["base"] = "invalid_default_sensor"
-            elif min_temp is not None and max_temp is not None and min_temp >= max_temp:
-                errors["base"] = "invalid_temp_range"
+            if error:
+                errors["base"] = error
             else:
-                data: dict[str, Any] = {}
-                if default_sensor == DEFAULT_SENSOR_LAST_ACTIVE:
-                    data[CONF_DEFAULT_SENSOR] = DEFAULT_SENSOR_LAST_ACTIVE
-                    data[CONF_USE_LAST_ACTIVE_SENSOR] = True
-                else:
-                    if default_sensor:
-                        data[CONF_DEFAULT_SENSOR] = default_sensor
-                    data[CONF_USE_LAST_ACTIVE_SENSOR] = False
-
-                data[CONF_COOLDOWN_PERIOD] = user_input.get(
-                    CONF_COOLDOWN_PERIOD, DEFAULT_COOLDOWN_PERIOD
-                )
-                data[CONF_MIN_TEMP] = min_temp
-                data[CONF_MAX_TEMP] = max_temp
-                data[CONF_MAX_SYNC_OFFSET] = max_sync_offset
-                data[CONF_DISABLE_AUTO_SWITCH] = disable_auto_switch
-                data[CONF_PRESERVE_VIRTUAL_TARGET] = preserve_virtual_target
-                data[CONF_SENSOR_CHANGE_THRESHOLD] = sensor_change_threshold
-                data[CONF_MAX_HUMIDITY_OVERCOOL] = max_humidity_overcool
-                data[CONF_DEFAULT_TARGET_HUMIDITY] = default_target_humidity
-                data[CONF_MIN_DUAL_TEMP_SPREAD] = (
-                    user_input.get(CONF_MIN_DUAL_TEMP_SPREAD) or None
-                )
-                data[CONF_OVERDRIVE_OFFSET] = overdrive_offset
-
                 return self.async_create_entry(title="", data=data)
 
-        schema_fields: dict[Any, Any] = {}
-
-        if sensor_names != [None]:
-            default_options = [
-                selector.SelectOptionDict(value=name, label=name)
-                for name in sensor_names
-            ]
-            default_options.append(
-                selector.SelectOptionDict(
-                    value=DEFAULT_SENSOR_LAST_ACTIVE,
-                    label="Last active sensor",
-                )
-            )
-            selector_config = selector.SelectSelectorConfig(options=default_options)
-            default_choice = (
-                DEFAULT_SENSOR_LAST_ACTIVE
-                if use_last_active_sensor
-                else current_default
-            )
-            schema_fields[
-                vol.Optional(
-                    CONF_DEFAULT_SENSOR,
-                    default=default_choice or sensor_names[0],
-                )
-            ] = selector.SelectSelector(selector_config)
-
-        schema_fields[vol.Optional(CONF_COOLDOWN_PERIOD, default=current_cooldown)] = (
-            selector.NumberSelector(
-                selector.NumberSelectorConfig(
-                    min=0,
-                    max=3600,
-                    unit_of_measurement="seconds",
-                    mode=selector.NumberSelectorMode.BOX,
-                )
-            )
+        default_sensor_options = sensor_names if sensor_names != [None] else None
+        default_choice = (
+            DEFAULT_SENSOR_LAST_ACTIVE
+            if settings[CONF_USE_LAST_ACTIVE_SENSOR]
+            else settings[CONF_DEFAULT_SENSOR]
+        )
+        default_sensor_value = (
+            (default_choice or sensor_names[0]) if default_sensor_options else None
         )
 
-        number_selector = selector.NumberSelector(
-            selector.NumberSelectorConfig(
-                max=100, step=0.5, mode=selector.NumberSelectorMode.BOX
-            )
+        schema_fields = _build_runtime_settings_schema(
+            settings=settings,
+            default_sensor_options=default_sensor_options,
+            default_sensor_value=default_sensor_value,
+            default_sensor_first=True,
         )
-
-        threshold_selector = selector.NumberSelector(
-            selector.NumberSelectorConfig(
-                min=0.0, max=10.0, step=0.1, mode=selector.NumberSelectorMode.BOX
-            )
-        )
-
-        # Show current values as defaults in options (0 = disabled)
-        min_temp_default = current_min_temp if current_min_temp is not None else 0
-        max_temp_default = current_max_temp if current_max_temp is not None else 0
-        max_sync_offset_default = (
-            current_max_sync_offset
-            if current_max_sync_offset is not None
-            else DEFAULT_MAX_SYNC_OFFSET
-        )
-
-        schema_fields[vol.Optional(CONF_MIN_TEMP, default=min_temp_default)] = (
-            number_selector
-        )
-        schema_fields[vol.Optional(CONF_MAX_TEMP, default=max_temp_default)] = (
-            number_selector
-        )
-        schema_fields[
-            vol.Optional(CONF_MAX_SYNC_OFFSET, default=max_sync_offset_default)
-        ] = number_selector
-        schema_fields[
-            vol.Optional(
-                CONF_SENSOR_CHANGE_THRESHOLD, default=current_sensor_change_threshold
-            )
-        ] = threshold_selector
-        current_target_change_behavior = _target_change_behavior_from_flags(
-            current_disable_auto_switch, current_preserve_virtual_target
-        )
-        schema_fields[
-            vol.Optional(
-                CONF_MAX_HUMIDITY_OVERCOOL,
-                default=current_max_humidity_overcool,
-            )
-        ] = selector.NumberSelector(
-            selector.NumberSelectorConfig(
-                min=0.0, max=10.0, step=0.5, mode=selector.NumberSelectorMode.BOX
-            )
-        )
-        schema_fields[
-            vol.Optional(
-                CONF_DEFAULT_TARGET_HUMIDITY,
-                default=current_default_target_humidity,
-            )
-        ] = selector.NumberSelector(
-            selector.NumberSelectorConfig(
-                min=30, max=99, step=1, mode=selector.NumberSelectorMode.BOX
-            )
-        )
-        schema_fields[
-            vol.Optional(
-                CONF_MIN_DUAL_TEMP_SPREAD,
-                default=(
-                    current_min_dual_temp_spread
-                    if current_min_dual_temp_spread is not None
-                    else 0.0
-                ),
-            )
-        ] = selector.NumberSelector(
-            selector.NumberSelectorConfig(
-                min=0.0, max=15.0, step=0.5, mode=selector.NumberSelectorMode.BOX
-            )
-        )
-        schema_fields[
-            vol.Optional(
-                CONF_OVERDRIVE_OFFSET,
-                default=(
-                    current_overdrive_offset
-                    if current_overdrive_offset is not None
-                    else DEFAULT_OVERDRIVE_OFFSET
-                ),
-            )
-        ] = _get_overdrive_offset_selector()
-        schema_fields[
-            vol.Optional(
-                CONF_PHYSICAL_TARGET_CHANGE_BEHAVIOR,
-                default=current_target_change_behavior,
-            )
-        ] = _target_change_behavior_selector()
-
-        data_schema = vol.Schema(schema_fields)
 
         return self.async_show_form(
             step_id="init",
-            data_schema=data_schema,
+            data_schema=vol.Schema(schema_fields),
             errors=errors,
         )
