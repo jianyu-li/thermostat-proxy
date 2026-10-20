@@ -1,18 +1,19 @@
 """Tests for integration setup and wiring."""
 
 from unittest.mock import patch
-import pytest
 
-from homeassistant.core import HomeAssistant
+import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.thermostat_proxy.const import (
-    DOMAIN,
-    CONF_THERMOSTAT,
-    CONF_SENSORS,
     CONF_DISABLE_AUTO_SWITCH,
+    CONF_OVERDRIVE_OFFSET,
     CONF_PRESERVE_VIRTUAL_TARGET,
+    CONF_SENSORS,
+    CONF_THERMOSTAT,
+    DOMAIN,
 )
+from homeassistant.core import HomeAssistant
 
 
 @pytest.fixture(autouse=True)
@@ -57,6 +58,7 @@ async def test_async_setup_entry_wiring(hass: HomeAssistant) -> None:
         options={
             CONF_DISABLE_AUTO_SWITCH: True,
             CONF_PRESERVE_VIRTUAL_TARGET: True,
+            CONF_OVERDRIVE_OFFSET: 0.0,
         },
         source="user",
         unique_id="proxy",
@@ -77,6 +79,7 @@ async def test_async_setup_entry_wiring(hass: HomeAssistant) -> None:
     if entity is not None:
         assert getattr(entity, "_disable_auto_switch", False) is True
         assert getattr(entity, "_preserve_virtual_target", False) is True
+        assert getattr(entity, "_overdrive_offset", None) == 0.0
 
 
 @pytest.mark.parametrize("mode", ["heat", "cool"])
@@ -147,23 +150,25 @@ async def test_external_change_real_flow(hass: HomeAssistant, mode: str) -> None
     proxy_state = hass.states.get("climate.thermostat_proxy")
     assert proxy_state.attributes["temperature"] == 25.0
 
+
 @pytest.mark.asyncio
 async def test_setup_platform(hass: HomeAssistant) -> None:
     """Test legacy YAML setup."""
     from custom_components.thermostat_proxy.climate import async_setup_platform
-    
+
     config = {
         "name": "YAML Proxy",
         "thermostat": "climate.real",
         "sensors": [{"name": "Remote", "entity_id": "sensor.remote"}],
         "default_sensor": "Remote",
     }
-    
+
     entities = []
+
     def add_entities(new_entities):
         entities.extend(new_entities)
-        
+
     await async_setup_platform(hass, config, add_entities, None)
-    
+
     assert len(entities) == 1
     assert entities[0].name == "YAML Proxy"

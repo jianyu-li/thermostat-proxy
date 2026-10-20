@@ -22,6 +22,7 @@ from .const import (
     CONF_MAX_TEMP,
     CONF_MIN_DUAL_TEMP_SPREAD,
     CONF_MIN_TEMP,
+    CONF_OVERDRIVE_OFFSET,
     CONF_PHYSICAL_SENSOR_NAME,
     CONF_PHYSICAL_TARGET_CHANGE_BEHAVIOR,
     CONF_PRESERVE_VIRTUAL_TARGET,
@@ -38,6 +39,7 @@ from .const import (
     DEFAULT_MAX_HUMIDITY_OVERCOOL,
     DEFAULT_MAX_SYNC_OFFSET,
     DEFAULT_NAME,
+    DEFAULT_OVERDRIVE_OFFSET,
     DEFAULT_PRESERVE_VIRTUAL_TARGET,
     DEFAULT_SENSOR_CHANGE_THRESHOLD,
     DEFAULT_SENSOR_LAST_ACTIVE,
@@ -102,6 +104,21 @@ def _target_change_behavior_selector() -> selector.SelectSelector:
     )
 
 
+def _coerce_overdrive_offset(user_input: dict[str, Any]) -> float:
+    """Coerce the overdrive offset from user input, falling back to default."""
+    val = user_input.get(CONF_OVERDRIVE_OFFSET)
+    return float(val) if val is not None else DEFAULT_OVERDRIVE_OFFSET
+
+
+def _get_overdrive_offset_selector() -> selector.NumberSelector:
+    """Build the overdrive offset number selector."""
+    return selector.NumberSelector(
+        selector.NumberSelectorConfig(
+            min=0.0, max=5.0, step=0.5, mode=selector.NumberSelectorMode.BOX
+        )
+    )
+
+
 class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Thermostat Proxy."""
 
@@ -129,6 +146,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._max_humidity_overcool: float = DEFAULT_MAX_HUMIDITY_OVERCOOL
         self._default_target_humidity: int = DEFAULT_TARGET_HUMIDITY
         self._min_dual_temp_spread: float | None = None
+        self._overdrive_offset: float = DEFAULT_OVERDRIVE_OFFSET
         self._reconfigure_entry: config_entries.ConfigEntry | None = None
         self._replace_target: str | None = None
 
@@ -222,6 +240,9 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             CONF_DEFAULT_TARGET_HUMIDITY, DEFAULT_TARGET_HUMIDITY
         )
         self._min_dual_temp_spread = entry.data.get(CONF_MIN_DUAL_TEMP_SPREAD)
+        self._overdrive_offset = entry.data.get(
+            CONF_OVERDRIVE_OFFSET, DEFAULT_OVERDRIVE_OFFSET
+        )
         self._use_last_active_sensor = entry.data.get(
             CONF_USE_LAST_ACTIVE_SENSOR, False
         )
@@ -591,6 +612,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 else DEFAULT_TARGET_HUMIDITY
             )
             min_dual_temp_spread = user_input.get(CONF_MIN_DUAL_TEMP_SPREAD) or None
+            overdrive_offset = _coerce_overdrive_offset(user_input)
 
             if any(
                 physical_sensor_name.lower() == sensor_name.lower()
@@ -627,6 +649,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._max_humidity_overcool = max_humidity_overcool
                 self._default_target_humidity = default_target_humidity
                 self._min_dual_temp_spread = min_dual_temp_spread
+                self._overdrive_offset = overdrive_offset
                 self._use_last_active_sensor = use_last_active_sensor
 
                 sensor_names_with_physical = list(sensor_names)
@@ -648,6 +671,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_MAX_HUMIDITY_OVERCOOL: max_humidity_overcool,
                     CONF_DEFAULT_TARGET_HUMIDITY: default_target_humidity,
                     CONF_MIN_DUAL_TEMP_SPREAD: min_dual_temp_spread,
+                    CONF_OVERDRIVE_OFFSET: overdrive_offset,
                 }
                 if self._use_last_active_sensor:
                     data[CONF_DEFAULT_SENSOR] = DEFAULT_SENSOR_LAST_ACTIVE
@@ -668,6 +692,8 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_USE_LAST_ACTIVE_SENSOR,
                         CONF_MAX_HUMIDITY_OVERCOOL,
                         CONF_DEFAULT_TARGET_HUMIDITY,
+                        CONF_MIN_DUAL_TEMP_SPREAD,
+                        CONF_OVERDRIVE_OFFSET,
                     ):
                         if key in options:
                             options[key] = data.get(key)
@@ -807,6 +833,16 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
         schema_fields[
             vol.Optional(
+                CONF_OVERDRIVE_OFFSET,
+                default=(
+                    self._overdrive_offset
+                    if self._overdrive_offset is not None
+                    else DEFAULT_OVERDRIVE_OFFSET
+                ),
+            )
+        ] = _get_overdrive_offset_selector()
+        schema_fields[
+            vol.Optional(
                 CONF_PHYSICAL_TARGET_CHANGE_BEHAVIOR,
                 default=target_change_behavior,
             )
@@ -917,6 +953,10 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
             CONF_MIN_DUAL_TEMP_SPREAD,
             self.config_entry.data.get(CONF_MIN_DUAL_TEMP_SPREAD),
         )
+        current_overdrive_offset = self.config_entry.options.get(
+            CONF_OVERDRIVE_OFFSET,
+            self.config_entry.data.get(CONF_OVERDRIVE_OFFSET, DEFAULT_OVERDRIVE_OFFSET),
+        )
 
         if current_default == DEFAULT_SENSOR_LAST_ACTIVE:
             use_last_active_sensor = True
@@ -958,6 +998,7 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
                 if user_input.get(CONF_DEFAULT_TARGET_HUMIDITY) is not None
                 else DEFAULT_TARGET_HUMIDITY
             )
+            overdrive_offset = _coerce_overdrive_offset(user_input)
 
             if default_sensor and default_sensor not in (
                 *sensor_names,
@@ -990,6 +1031,7 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
                 data[CONF_MIN_DUAL_TEMP_SPREAD] = (
                     user_input.get(CONF_MIN_DUAL_TEMP_SPREAD) or None
                 )
+                data[CONF_OVERDRIVE_OFFSET] = overdrive_offset
 
                 return self.async_create_entry(title="", data=data)
 
@@ -1102,6 +1144,16 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
                 min=0.0, max=15.0, step=0.5, mode=selector.NumberSelectorMode.BOX
             )
         )
+        schema_fields[
+            vol.Optional(
+                CONF_OVERDRIVE_OFFSET,
+                default=(
+                    current_overdrive_offset
+                    if current_overdrive_offset is not None
+                    else DEFAULT_OVERDRIVE_OFFSET
+                ),
+            )
+        ] = _get_overdrive_offset_selector()
         schema_fields[
             vol.Optional(
                 CONF_PHYSICAL_TARGET_CHANGE_BEHAVIOR,

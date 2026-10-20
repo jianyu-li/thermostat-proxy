@@ -1,31 +1,32 @@
 """Test the Thermostat Proxy config flow."""
 
 from unittest.mock import patch
-import pytest
 
-from homeassistant import config_entries
-from homeassistant.core import HomeAssistant
-from homeassistant.data_entry_flow import FlowResultType
+import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.thermostat_proxy.const import (
-    DOMAIN,
-    CONF_THERMOSTAT,
-    CONF_SENSORS,
-    CONF_PHYSICAL_SENSOR_NAME,
-    CONF_COOLDOWN_PERIOD,
-    CONF_MIN_DUAL_TEMP_SPREAD,
-    CONF_DISABLE_AUTO_SWITCH,
-    CONF_PRESERVE_VIRTUAL_TARGET,
-    CONF_PHYSICAL_TARGET_CHANGE_BEHAVIOR,
-    TARGET_CHANGE_BEHAVIOR_PRESERVE_VIRTUAL_TARGET,
-    TARGET_CHANGE_BEHAVIOR_AUTO_SWITCH,
-    TARGET_CHANGE_BEHAVIOR_DISABLE_AUTO_SWITCH,
-)
 from custom_components.thermostat_proxy.config_flow import (
     _target_change_behavior_from_flags,
     _target_change_flags_from_behavior,
 )
+from custom_components.thermostat_proxy.const import (
+    CONF_COOLDOWN_PERIOD,
+    CONF_DISABLE_AUTO_SWITCH,
+    CONF_MIN_DUAL_TEMP_SPREAD,
+    CONF_OVERDRIVE_OFFSET,
+    CONF_PHYSICAL_SENSOR_NAME,
+    CONF_PHYSICAL_TARGET_CHANGE_BEHAVIOR,
+    CONF_PRESERVE_VIRTUAL_TARGET,
+    CONF_SENSORS,
+    CONF_THERMOSTAT,
+    DOMAIN,
+    TARGET_CHANGE_BEHAVIOR_AUTO_SWITCH,
+    TARGET_CHANGE_BEHAVIOR_DISABLE_AUTO_SWITCH,
+    TARGET_CHANGE_BEHAVIOR_PRESERVE_VIRTUAL_TARGET,
+)
+from homeassistant import config_entries
+from homeassistant.core import HomeAssistant
+from homeassistant.data_entry_flow import FlowResultType
 
 
 @pytest.fixture(autouse=True)
@@ -57,9 +58,7 @@ def test_target_change_behavior_legacy_mapping(
 ) -> None:
     """Test mapping between the UI behavior and legacy settings."""
     assert (
-        _target_change_behavior_from_flags(
-            disable_auto_switch, preserve_virtual_target
-        )
+        _target_change_behavior_from_flags(disable_auto_switch, preserve_virtual_target)
         == behavior
     )
     assert _target_change_flags_from_behavior(behavior) == mapped_flags
@@ -111,6 +110,7 @@ async def test_user_flow_success(hass: HomeAssistant) -> None:
             "cooldown_period": 1800,
             "physical_sensor_name": "Physical",
             "min_dual_temp_spread": 4.0,
+            CONF_OVERDRIVE_OFFSET: 0.5,
             CONF_PHYSICAL_TARGET_CHANGE_BEHAVIOR: (
                 TARGET_CHANGE_BEHAVIOR_PRESERVE_VIRTUAL_TARGET
             ),
@@ -124,6 +124,7 @@ async def test_user_flow_success(hass: HomeAssistant) -> None:
     assert result["data"][CONF_COOLDOWN_PERIOD] == 1800
     assert result["data"][CONF_PHYSICAL_SENSOR_NAME] == "Physical"
     assert result["data"][CONF_MIN_DUAL_TEMP_SPREAD] == 4.0
+    assert result["data"][CONF_OVERDRIVE_OFFSET] == 0.5
     assert result["data"]["disable_auto_switch"] is True
     assert result["data"]["preserve_virtual_target"] is True
 
@@ -157,6 +158,7 @@ async def test_options_flow(hass: HomeAssistant) -> None:
             "cooldown_period": 1800,
             "default_sensor": "Remote",
             "min_dual_temp_spread": 4.5,
+            CONF_OVERDRIVE_OFFSET: 0.5,
             CONF_PHYSICAL_TARGET_CHANGE_BEHAVIOR: (
                 TARGET_CHANGE_BEHAVIOR_PRESERVE_VIRTUAL_TARGET
             ),
@@ -167,6 +169,7 @@ async def test_options_flow(hass: HomeAssistant) -> None:
     assert result["data"]["cooldown_period"] == 1800
     assert result["data"]["default_sensor"] == "Remote"
     assert result["data"]["min_dual_temp_spread"] == 4.5
+    assert result["data"][CONF_OVERDRIVE_OFFSET] == 0.5
     assert result["data"]["disable_auto_switch"] is True
     assert result["data"]["preserve_virtual_target"] is True
 
@@ -300,6 +303,7 @@ async def test_replace_sensor_keep_name(hass: HomeAssistant) -> None:
     assert result["data"][CONF_SENSORS][0]["name"] == "Remote"
     assert result["data"][CONF_SENSORS][0]["entity_id"] == "sensor.kitchen"
 
+
 @pytest.mark.asyncio
 async def test_reconfigure_flow(hass: HomeAssistant) -> None:
     """Test the reconfigure flow."""
@@ -325,9 +329,12 @@ async def test_reconfigure_flow(hass: HomeAssistant) -> None:
     # Initialize the reconfigure flow
     result = await hass.config_entries.flow.async_init(
         DOMAIN,
-        context={"source": config_entries.SOURCE_RECONFIGURE, "entry_id": entry.entry_id},
+        context={
+            "source": config_entries.SOURCE_RECONFIGURE,
+            "entry_id": entry.entry_id,
+        },
     )
-    
+
     assert result["type"] == "form"
     assert result["step_id"] == "reconfigure"
 
@@ -336,28 +343,28 @@ async def test_reconfigure_flow(hass: HomeAssistant) -> None:
         result["flow_id"],
         {"name": "New Proxy", "thermostat": "climate.new_real"},
     )
-    
+
     assert result2["type"] == "form"
     assert result2["step_id"] == "manage_sensors"
-    
+
     # Submit manage sensors
     result3 = await hass.config_entries.flow.async_configure(
         result2["flow_id"],
         {"action": "finish"},
     )
-    
+
     assert result3["type"] == "form"
     assert result3["step_id"] == "finalize"
-    
+
     # Submit finalize
     result4 = await hass.config_entries.flow.async_configure(
         result3["flow_id"],
         {},
     )
-    
+
     assert result4["type"] == "abort"
     assert result4["reason"] == "reconfigure_successful"
-    
+
     # Check the updated entry
     assert entry.data["name"] == "New Proxy"
     assert entry.data["thermostat"] == "climate.new_real"
