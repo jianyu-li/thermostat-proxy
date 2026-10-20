@@ -101,6 +101,7 @@
           "max_temp": "Maximum safe temperature",
           "min_dual_temp_spread": "Minimum dual setpoint deadband",
           "min_temp": "Minimum safe temperature",
+          "overdrive_offset": "Temperature overdrive offset",
           "physical_sensor_name": "Physical thermostat preset name",
           "physical_target_change_behavior": "Physical target change behavior",
           "sensor_change_threshold": "Sensor change threshold"
@@ -114,6 +115,7 @@
           "max_temp": "Highest allowable target temperature (safety ceiling). Any target above this is clamped. Set to 0 to disable.",
           "min_dual_temp_spread": "Minimum degree separation between heat and cool setpoints sent to the physical thermostat in Heat/Cool mode (e.g. 5.0°F for ecobee). Prevents hardware firmware setpoint clamping. Set to 0 for automatic.",
           "min_temp": "Lowest allowable target temperature (safety floor). Any target below this is clamped. Set to 0 to disable.",
+          "overdrive_offset": "Extra degree offset applied to force the physical thermostat to run when the remote sensor is not satisfied but the thermostat is idle. Set to 0 to disable (default 1.0°).",
           "physical_sensor_name": "Preset name for the physical thermostat's internal temperature sensor (defaults to 'Physical Entity').",
           "physical_target_change_behavior": "How the proxy responds when setpoints are changed directly on the physical thermostat hardware (e.g., turning the physical dial).",
           "sensor_change_threshold": "Minimum temperature change required at the active sensor before updating the physical thermostat. Filters out noise and frequent micro-adjustments. Set to 0 to disable."
@@ -148,6 +150,7 @@
           "max_temp": "Maximum safe temperature",
           "min_dual_temp_spread": "Minimum dual setpoint deadband",
           "min_temp": "Minimum safe temperature",
+          "overdrive_offset": "Temperature overdrive offset",
           "physical_target_change_behavior": "Physical target change behavior",
           "sensor_change_threshold": "Sensor change threshold"
         },
@@ -160,6 +163,7 @@
           "max_temp": "Highest allowable target temperature (safety ceiling). Any target above this is clamped. Set to 0 to disable.",
           "min_dual_temp_spread": "Minimum degree separation between heat and cool setpoints sent to the physical thermostat in Heat/Cool mode (e.g. 5.0°F for ecobee). Prevents hardware firmware setpoint clamping. Set to 0 for automatic.",
           "min_temp": "Lowest allowable target temperature (safety floor). Any target below this is clamped. Set to 0 to disable.",
+          "overdrive_offset": "Extra degree offset applied to force the physical thermostat to run when the remote sensor is not satisfied but the thermostat is idle. Set to 0 to disable (default 1.0°).",
           "physical_target_change_behavior": "How the proxy responds when setpoints are changed directly on the physical thermostat hardware (e.g., turning the physical dial).",
           "sensor_change_threshold": "Minimum temperature change required at the active sensor before updating the physical thermostat. Filters out noise and frequent micro-adjustments. Set to 0 to disable."
         }

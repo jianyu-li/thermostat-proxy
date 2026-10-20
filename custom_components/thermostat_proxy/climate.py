@@ -76,6 +76,7 @@ from .const import (
     CONF_MAX_TEMP,
     CONF_MIN_DUAL_TEMP_SPREAD,
     CONF_MIN_TEMP,
+    CONF_OVERDRIVE_OFFSET,
     CONF_PHYSICAL_SENSOR_NAME,
     CONF_PRESERVE_VIRTUAL_TARGET,
     CONF_SENSOR_CHANGE_THRESHOLD,
@@ -94,12 +95,12 @@ from .const import (
     DEFAULT_MIN_DUAL_TEMP_SPREAD_CELSIUS,
     DEFAULT_MIN_DUAL_TEMP_SPREAD_FAHRENHEIT,
     DEFAULT_NAME,
+    DEFAULT_OVERDRIVE_OFFSET,
     DEFAULT_PRESERVE_VIRTUAL_TARGET,
     DEFAULT_SENSOR_CHANGE_THRESHOLD,
     DEFAULT_SENSOR_LAST_ACTIVE,
     DEFAULT_TARGET_HUMIDITY,
     OVERDRIVE_ADJUSTMENT_COOL,
-    OVERDRIVE_ADJUSTMENT_HEAT,
     PHYSICAL_SENSOR_NAME,
     PHYSICAL_SENSOR_SENTINEL,
     SYNC_LOG_SUPPRESSION_PADDING_SEC,
@@ -196,6 +197,9 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
             CONF_SENSOR_CHANGE_THRESHOLD, default=DEFAULT_SENSOR_CHANGE_THRESHOLD
         ): vol.Coerce(float),
         vol.Optional(CONF_MIN_DUAL_TEMP_SPREAD): vol.Coerce(float),
+        vol.Optional(
+            CONF_OVERDRIVE_OFFSET, default=DEFAULT_OVERDRIVE_OFFSET
+        ): vol.Coerce(float),
     }
 )
 
@@ -249,6 +253,9 @@ async def async_setup_platform(
                     CONF_DEFAULT_TARGET_HUMIDITY, DEFAULT_TARGET_HUMIDITY
                 ),
                 min_dual_temp_spread=config.get(CONF_MIN_DUAL_TEMP_SPREAD),
+                overdrive_offset=config.get(
+                    CONF_OVERDRIVE_OFFSET, DEFAULT_OVERDRIVE_OFFSET
+                ),
             )
         ]
     )
@@ -318,6 +325,10 @@ async def async_setup_entry(
         CONF_MIN_DUAL_TEMP_SPREAD,
         data.get(CONF_MIN_DUAL_TEMP_SPREAD),
     )
+    overdrive_offset = entry.options.get(
+        CONF_OVERDRIVE_OFFSET,
+        data.get(CONF_OVERDRIVE_OFFSET, DEFAULT_OVERDRIVE_OFFSET),
+    )
     preserve_virtual_target = entry.options.get(
         CONF_PRESERVE_VIRTUAL_TARGET,
         data.get(CONF_PRESERVE_VIRTUAL_TARGET, DEFAULT_PRESERVE_VIRTUAL_TARGET),
@@ -358,6 +369,7 @@ async def async_setup_entry(
                 max_humidity_overcool=max_humidity_overcool,
                 default_target_humidity=default_target_humidity,
                 min_dual_temp_spread=min_dual_temp_spread,
+                overdrive_offset=overdrive_offset,
             )
         ]
     )
@@ -399,6 +411,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         max_humidity_overcool: float = DEFAULT_MAX_HUMIDITY_OVERCOOL,
         default_target_humidity: int = DEFAULT_TARGET_HUMIDITY,
         min_dual_temp_spread: float | None = None,
+        overdrive_offset: float = DEFAULT_OVERDRIVE_OFFSET,
     ) -> None:
         self.hass = hass
         if isinstance(cooldown_period, (int, float)):
@@ -481,6 +494,17 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self._min_dual_temp_spread: float | None = (
             float(min_dual_temp_spread) if min_dual_temp_spread is not None else None
         )
+        self._overdrive_offset: float = (
+            float(overdrive_offset)
+            if overdrive_offset is not None
+            else DEFAULT_OVERDRIVE_OFFSET
+        )
+        self._last_commanded_real_target: float | None = None
+        self._last_snapped_real_target: float | None = None
+        self._last_commanded_real_target_low: float | None = None
+        self._last_commanded_real_target_high: float | None = None
+        self._last_snapped_real_target_low: float | None = None
+        self._last_snapped_real_target_high: float | None = None
 
     def _log_debug(self, msg: str, *args: Any) -> None:
         """Log diagnostic information."""
@@ -662,6 +686,9 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self._enforce_hvac_mode_restrictions(new_state.state)
 
         mode_changed = old_state is not None and old_state.state != new_state.state
+        if mode_changed:
+            self._reset_overdrive_state()
+            self._reset_commanded_targets()
 
         # Handle mode transition target sync between dual and single setpoint modes
         if mode_changed and old_state is not None:
@@ -727,6 +754,12 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         )
         skip_external_change = was_not_controlling or mode_changed
 
+        old_real_target = (
+            _coerce_temperature(old_state.attributes.get(ATTR_TEMPERATURE))
+            if old_state
+            else None
+        )
+
         if real_target is not None:
             previous_real_target = self._last_real_target_temp
             self._last_real_target_temp = real_target
@@ -738,12 +771,17 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 PENDING_REQUEST_TOLERANCE_MAX,
                 step_size * 0.75,
             )
+            abs_tol = (step_size * 0.5) if step_size else EXTERNAL_CHANGE_TOLERANCE
+
             # Two-tiered matching: strict consumes, loose suppresses.
             if self._consume_real_target_request(real_target, strict_tolerance):
+                self._last_snapped_real_target = real_target
                 self._log_debug(
                     "Real target %s matched pending request (strict)", real_target
                 )
             elif self._has_pending_real_target_request(real_target, loose_tolerance):
+                self._consume_real_target_request(real_target, loose_tolerance)
+                self._last_snapped_real_target = real_target
                 self._log_debug(
                     "Real target %s matched pending request (loose) - ignoring potential external change",
                     real_target,
@@ -759,6 +797,12 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                         real_target,
                     )
                 elif is_recent_write:
+                    if self._last_commanded_real_target is not None and math.isclose(
+                        real_target,
+                        self._last_commanded_real_target,
+                        abs_tol=loose_tolerance,
+                    ):
+                        self._last_snapped_real_target = real_target
                     self._log_debug(
                         "Real target %s changed during post-write grace period (%.1fs < %.1fs) - ignoring potential echo",
                         real_target,
@@ -766,23 +810,36 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                         POST_WRITE_GRACE_PERIOD,
                     )
                 else:
-                    abs_tol = (
-                        (step_size * 0.5) if step_size else EXTERNAL_CHANGE_TOLERANCE
-                    )
                     if not math.isclose(
                         real_target,
                         previous_real_target,
                         abs_tol=abs_tol,
                     ):
-                        _LOGGER.info(
-                            "Detected potential external change: %s -> %s (tolerance %s)",
-                            previous_real_target,
-                            real_target,
-                            abs_tol,
-                        )
-                        self._handle_external_real_target_change(
-                            real_target, previous_real_target
-                        )
+                        if self._is_snapped_target_readback(
+                            real_val=real_target,
+                            commanded_val=self._last_commanded_real_target,
+                            snapped_val=self._last_snapped_real_target,
+                            previous_val=previous_real_target,
+                            old_val=old_real_target,
+                            loose_tolerance=loose_tolerance,
+                            abs_tol=abs_tol,
+                        ):
+                            self._last_snapped_real_target = real_target
+                            self._log_debug(
+                                "Real target %s matches snapped/commanded target %s - ignoring as read-back",
+                                real_target,
+                                self._last_commanded_real_target,
+                            )
+                        else:
+                            _LOGGER.info(
+                                "Detected potential external change: %s -> %s (tolerance %s)",
+                                previous_real_target,
+                                real_target,
+                                abs_tol,
+                            )
+                            self._handle_external_real_target_change(
+                                real_target, previous_real_target
+                            )
             else:
                 self._log_debug("Initial real target captured: %s", real_target)
 
@@ -822,6 +879,58 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         """Return True if the physical thermostat preset is currently selected."""
         sensor = self._sensor_lookup.get(self._selected_sensor_name)
         return not sensor or sensor.is_physical
+
+    def _is_remote_sensor_controlling(self) -> bool:
+        """Return True if a healthy remote sensor preset is actively controlling."""
+        return self.preset_mode != self._physical_sensor_name
+
+    def _reset_overdrive_state(self) -> None:
+        """Reset all active overdrive flags."""
+        self._active_overdrive_heat = False
+        self._active_overdrive_cool = False
+        self._active_overdrive_humidity = False
+
+    def _reset_commanded_targets(
+        self, *, single: bool = True, dual: bool = True
+    ) -> None:
+        """Reset tracked commanded and snapped real thermostat targets."""
+        if single:
+            self._last_commanded_real_target = None
+            self._last_snapped_real_target = None
+        if dual:
+            self._last_commanded_real_target_low = None
+            self._last_commanded_real_target_high = None
+            self._last_snapped_real_target_low = None
+            self._last_snapped_real_target_high = None
+
+    @staticmethod
+    def _is_snapped_target_readback(
+        real_val: float,
+        commanded_val: float | None,
+        snapped_val: float | None,
+        previous_val: float | None,
+        old_val: float | None,
+        loose_tolerance: float,
+        abs_tol: float,
+    ) -> bool:
+        """Return True if real_val is a hardware-snapped read-back of commanded_val."""
+        if commanded_val is None or not math.isclose(
+            real_val, commanded_val, abs_tol=loose_tolerance
+        ):
+            return False
+        return (
+            (
+                snapped_val is not None
+                and math.isclose(real_val, snapped_val, abs_tol=abs_tol)
+            )
+            or (
+                old_val is not None and math.isclose(real_val, old_val, abs_tol=abs_tol)
+            )
+            or (
+                previous_val is not None
+                and math.isclose(previous_val, commanded_val, abs_tol=abs_tol)
+            )
+        )
 
     def _is_active_sensor_entity(self, entity_id: str | None) -> bool:
         if not entity_id:
@@ -908,6 +1017,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     previous_real_target,
                     real_target,
                 )
+                self._last_snapped_real_target = None
                 return
             if (
                 previous_real_target is not None
@@ -930,6 +1040,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                         )
                         self._virtual_target_temperature = new_virtual
                         self._last_real_write_time = time.monotonic()
+                        self._reset_overdrive_state()
+                        self._reset_commanded_targets(single=True, dual=False)
                         self.async_write_ha_state()
             else:
                 self._log_debug(
@@ -938,6 +1050,9 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     self._virtual_target_temperature,
                 )
             return
+
+        self._reset_overdrive_state()
+        self._reset_commanded_targets()
 
         self._virtual_target_temperature = self._apply_target_constraints(real_target)
 
@@ -979,18 +1094,50 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             low_pending_consumed = self._consume_real_target_request(
                 real_low, strict_tolerance
             )
+            if low_pending_consumed:
+                self._last_snapped_real_target_low = real_low
+            elif self._has_pending_real_target_request(real_low, loose_tolerance):
+                self._consume_real_target_request(real_low, loose_tolerance)
+                self._last_snapped_real_target_low = real_low
+                low_pending_consumed = True
 
         high_pending_consumed = False
         if real_high is not None:
             high_pending_consumed = self._consume_real_target_request(
                 real_high, strict_tolerance
             )
+            if high_pending_consumed:
+                self._last_snapped_real_target_high = real_high
+            elif self._has_pending_real_target_request(real_high, loose_tolerance):
+                self._consume_real_target_request(real_high, loose_tolerance)
+                self._last_snapped_real_target_high = real_high
+                high_pending_consumed = True
 
         if was_not_controlling:
             return
 
         time_since_write = time.monotonic() - self._last_real_write_time
         if time_since_write < POST_WRITE_GRACE_PERIOD:
+            if (
+                real_low is not None
+                and self._last_commanded_real_target_low is not None
+                and math.isclose(
+                    real_low,
+                    self._last_commanded_real_target_low,
+                    abs_tol=loose_tolerance,
+                )
+            ):
+                self._last_snapped_real_target_low = real_low
+            if (
+                real_high is not None
+                and self._last_commanded_real_target_high is not None
+                and math.isclose(
+                    real_high,
+                    self._last_commanded_real_target_high,
+                    abs_tol=loose_tolerance,
+                )
+            ):
+                self._last_snapped_real_target_high = real_high
             return
 
         abs_tol = (step_size * 0.5) if step_size else EXTERNAL_CHANGE_TOLERANCE
@@ -1010,8 +1157,52 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             and not self._has_pending_real_target_request(real_high, loose_tolerance)
         )
 
+        if (
+            low_changed
+            and real_low is not None
+            and self._is_snapped_target_readback(
+                real_val=real_low,
+                commanded_val=self._last_commanded_real_target_low,
+                snapped_val=self._last_snapped_real_target_low,
+                previous_val=previous_low,
+                old_val=None,
+                loose_tolerance=loose_tolerance,
+                abs_tol=abs_tol,
+            )
+        ):
+            self._last_snapped_real_target_low = real_low
+            self._log_debug(
+                "Real low target %s matches snapped/commanded target %s - ignoring as read-back",
+                real_low,
+                self._last_commanded_real_target_low,
+            )
+            low_changed = False
+
+        if (
+            high_changed
+            and real_high is not None
+            and self._is_snapped_target_readback(
+                real_val=real_high,
+                commanded_val=self._last_commanded_real_target_high,
+                snapped_val=self._last_snapped_real_target_high,
+                previous_val=previous_high,
+                old_val=None,
+                loose_tolerance=loose_tolerance,
+                abs_tol=abs_tol,
+            )
+        ):
+            self._last_snapped_real_target_high = real_high
+            self._log_debug(
+                "Real high target %s matches snapped/commanded target %s - ignoring as read-back",
+                real_high,
+                self._last_commanded_real_target_high,
+            )
+            high_changed = False
+
         if not low_changed and not high_changed:
             return
+
+        self._reset_overdrive_state()
 
         _LOGGER.info(
             "Detected external dual setpoint change: low %s -> %s, high %s -> %s",
@@ -1029,6 +1220,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 self._log_debug(
                     "Ignoring external dual target change while preserving the virtual targets"
                 )
+                self._last_snapped_real_target_low = None
+                self._last_snapped_real_target_high = None
                 return
             if low_changed and previous_low is not None and real_low is not None:
                 delta = real_low - previous_low
@@ -1037,6 +1230,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     new_low = self._apply_target_constraints(derived)
                     if new_low is not None:
                         self._virtual_target_temperature_low = new_low
+                        self._last_commanded_real_target_low = None
+                        self._last_snapped_real_target_low = None
             if high_changed and previous_high is not None and real_high is not None:
                 delta = real_high - previous_high
                 if self._virtual_target_temperature_high is not None:
@@ -1044,6 +1239,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     new_high = self._apply_target_constraints(derived)
                     if new_high is not None:
                         self._virtual_target_temperature_high = new_high
+                        self._last_commanded_real_target_high = None
+                        self._last_snapped_real_target_high = None
 
             self._last_real_write_time = time.monotonic()
             self.async_write_ha_state()
@@ -1079,6 +1276,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             self._virtual_target_temperature_high = self._apply_target_constraints(
                 real_high
             )
+
+        self._reset_commanded_targets(single=False, dual=True)
 
         switched = self._selected_sensor_name != self._physical_sensor_name
         self._selected_sensor_name = self._physical_sensor_name
@@ -1654,9 +1853,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
     async def async_set_temperature(self, **kwargs: Any) -> None:
         async with self._command_lock:
             # Reset overdrive state on manual temperature change
-            self._active_overdrive_heat = False
-            self._active_overdrive_cool = False
-            self._active_overdrive_humidity = False
+            self._reset_overdrive_state()
+            self._reset_commanded_targets()
 
             # Handle dual setpoints for range-based modes (Auto/Heat-Cool)
             high = kwargs.get(ATTR_TARGET_TEMP_HIGH)
@@ -1761,8 +1959,14 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
                 if ATTR_TARGET_TEMP_HIGH in payload:
                     self._record_real_target_request(payload[ATTR_TARGET_TEMP_HIGH])
+                    self._last_commanded_real_target_high = payload[
+                        ATTR_TARGET_TEMP_HIGH
+                    ]
+                    self._last_snapped_real_target_high = None
                 if ATTR_TARGET_TEMP_LOW in payload:
                     self._record_real_target_request(payload[ATTR_TARGET_TEMP_LOW])
+                    self._last_commanded_real_target_low = payload[ATTR_TARGET_TEMP_LOW]
+                    self._last_snapped_real_target_low = None
 
                 self._last_real_write_time = time.monotonic()
                 self._start_auto_sync_log_suppression()
@@ -1861,8 +2065,12 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     self._last_real_target_temp,
                     self._last_real_write_time,
                     self._suppress_sync_logs_until,
+                    self._last_commanded_real_target,
+                    self._last_snapped_real_target,
                 )
 
+                self._last_commanded_real_target = real_target
+                self._last_snapped_real_target = None
                 self._last_real_target_temp = real_target
                 self._last_real_write_time = time.monotonic()
                 self._start_auto_sync_log_suppression()
@@ -1879,6 +2087,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     self._last_real_target_temp,
                     self._last_real_write_time,
                     self._suppress_sync_logs_until,
+                    self._last_commanded_real_target,
+                    self._last_snapped_real_target,
                 ) = previous_state
                 self._remove_real_target_request(real_target)
                 raise
@@ -1948,9 +2158,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         self._log_debug("async_set_hvac_mode called with mode: %s", hvac_mode)
         # Reset overdrive state on mode change
-        self._active_overdrive_heat = False
-        self._active_overdrive_cool = False
-        self._active_overdrive_humidity = False
+        self._reset_overdrive_state()
+        self._reset_commanded_targets()
 
         await self.hass.services.async_call(
             CLIMATE_DOMAIN,
@@ -2005,7 +2214,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
     async def async_set_preset_mode(self, preset_mode: str) -> None:
         self._log_debug("async_set_preset_mode called with preset: %s", preset_mode)
-        self._active_overdrive_humidity = False
+        self._reset_overdrive_state()
+        self._reset_commanded_targets()
         if preset_mode not in self._sensor_lookup:
             raise ValueError(f"Unknown preset '{preset_mode}'")
 
@@ -2411,7 +2621,11 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             overdrive_active = False
             overdrive_adjust = 0.0
 
-            if self._real_state and self.hvac_mode in (HVACMode.HEAT, HVACMode.COOL):
+            if (
+                self._is_remote_sensor_controlling()
+                and self._real_state
+                and self.hvac_mode in (HVACMode.HEAT, HVACMode.COOL)
+            ):
                 real_action = self._real_state.attributes.get(ATTR_HVAC_ACTION)
                 tolerance = max(self.precision or DEFAULT_PRECISION, 0.1)
                 deadband = max(tolerance, self._sensor_change_threshold)
@@ -2429,13 +2643,15 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                         )
 
                     not_heating = real_action != HVACAction.HEATING
-                    if want_heat and (not_heating or self._active_overdrive_heat):
+                    if (
+                        self._overdrive_offset > 0
+                        and want_heat
+                        and (not_heating or self._active_overdrive_heat)
+                    ):
                         self._active_overdrive_heat = True
                         overdrive_active = True
                         # Push target up to force start
-                        overdrive_adjust = (
-                            OVERDRIVE_ADJUSTMENT_HEAT  # Degree matching unit
-                        )
+                        overdrive_adjust = self._overdrive_offset
                         _LOGGER.info(
                             "Overdrive active: Heating required but thermostat idle. Applying +%s offset.",
                             overdrive_adjust,
@@ -2456,11 +2672,15 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                         )
 
                     not_cooling = real_action != HVACAction.COOLING
-                    if want_cool and (not_cooling or self._active_overdrive_cool):
+                    if (
+                        self._overdrive_offset > 0
+                        and want_cool
+                        and (not_cooling or self._active_overdrive_cool)
+                    ):
                         self._active_overdrive_cool = True
                         overdrive_active = True
                         # Push target down to force start
-                        overdrive_adjust = OVERDRIVE_ADJUSTMENT_COOL
+                        overdrive_adjust = -self._overdrive_offset
                         _LOGGER.info(
                             "Overdrive active: Cooling required but thermostat idle. Applying %s offset.",
                             overdrive_adjust,
@@ -2480,6 +2700,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                             overdrive_adjust = humidity_adjust
                     else:
                         self._active_overdrive_humidity = False
+            else:
+                self._reset_overdrive_state()
 
             if overdrive_active:
                 if self._active_overdrive_humidity:
@@ -2520,6 +2742,28 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             ):
                 return
 
+            if (
+                current_real_target is not None
+                and self._last_commanded_real_target is not None
+                and self._last_snapped_real_target is not None
+                and math.isclose(
+                    desired_real_target,
+                    self._last_commanded_real_target,
+                    abs_tol=target_tolerance,
+                )
+                and math.isclose(
+                    current_real_target,
+                    self._last_snapped_real_target,
+                    abs_tol=target_tolerance,
+                )
+            ):
+                self._log_debug(
+                    "Real thermostat already at snapped target %s for commanded target %s; skipping write",
+                    current_real_target,
+                    desired_real_target,
+                )
+                return
+
             pending_tolerance = self._pending_request_tolerance()
             if self._has_pending_real_target_request(
                 desired_real_target, pending_tolerance
@@ -2552,7 +2796,19 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     self._last_real_target_temp,
                     self._last_real_write_time,
                     self._suppress_sync_logs_until,
+                    self._last_commanded_real_target,
+                    self._last_snapped_real_target,
                 )
+
+                step_size = self.target_temperature_step or 0
+                loose_tolerance = max(PENDING_REQUEST_TOLERANCE_MAX, step_size * 0.75)
+                self._last_commanded_real_target = desired_real_target
+                if current_real_target is not None and math.isclose(
+                    current_real_target, desired_real_target, abs_tol=loose_tolerance
+                ):
+                    self._last_snapped_real_target = current_real_target
+                else:
+                    self._last_snapped_real_target = None
 
                 self._last_real_target_temp = desired_real_target
                 self._last_real_write_time = time.monotonic()
@@ -2573,6 +2829,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     self._last_real_target_temp,
                     self._last_real_write_time,
                     self._suppress_sync_logs_until,
+                    self._last_commanded_real_target,
+                    self._last_snapped_real_target,
                 ) = previous_state
                 self._remove_real_target_request(desired_real_target)
 
@@ -2625,11 +2883,17 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         overdrive_adjust_low = 0.0
         overdrive_adjust_high = 0.0
 
-        if self._real_state and self.hvac_mode in (
-            HVACMode.HEAT,
-            HVACMode.COOL,
-            HVACMode.HEAT_COOL,
-            HVACMode.AUTO,
+        if (
+            self._is_remote_sensor_controlling()
+            and self._overdrive_offset > 0
+            and self._real_state
+            and self.hvac_mode
+            in (
+                HVACMode.HEAT,
+                HVACMode.COOL,
+                HVACMode.HEAT_COOL,
+                HVACMode.AUTO,
+            )
         ):
             real_action = self._real_state.attributes.get(ATTR_HVAC_ACTION)
             tolerance = max(self.precision or DEFAULT_PRECISION, 0.1)
@@ -2651,7 +2915,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 not_heating = real_action != HVACAction.HEATING
                 if want_heat and (not_heating or self._active_overdrive_heat):
                     self._active_overdrive_heat = True
-                    overdrive_adjust_low = OVERDRIVE_ADJUSTMENT_HEAT
+                    overdrive_adjust_low = self._overdrive_offset
                     _LOGGER.info(
                         "Overdrive active (dual low): Heating required but thermostat idle. Applying +%s offset.",
                         overdrive_adjust_low,
@@ -2675,7 +2939,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 not_cooling = real_action != HVACAction.COOLING
                 if want_cool and (not_cooling or self._active_overdrive_cool):
                     self._active_overdrive_cool = True
-                    overdrive_adjust_high = OVERDRIVE_ADJUSTMENT_COOL
+                    overdrive_adjust_high = -self._overdrive_offset
                     _LOGGER.info(
                         "Overdrive active (dual high): Cooling required but thermostat idle. Applying %s offset.",
                         overdrive_adjust_high,
@@ -2684,6 +2948,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     self._active_overdrive_cool = False
 
                 self._active_overdrive_humidity = False
+        else:
+            self._reset_overdrive_state()
 
         if calculated_real_low is not None and overdrive_adjust_low != 0.0:
             calculated_real_low += overdrive_adjust_low
@@ -2759,14 +3025,46 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
         low_matches = desired_real_low is None or (
             current_real_low is not None
-            and math.isclose(
-                current_real_low, desired_real_low, abs_tol=target_tolerance
+            and (
+                math.isclose(
+                    current_real_low, desired_real_low, abs_tol=target_tolerance
+                )
+                or (
+                    self._last_commanded_real_target_low is not None
+                    and self._last_snapped_real_target_low is not None
+                    and math.isclose(
+                        desired_real_low,
+                        self._last_commanded_real_target_low,
+                        abs_tol=target_tolerance,
+                    )
+                    and math.isclose(
+                        current_real_low,
+                        self._last_snapped_real_target_low,
+                        abs_tol=target_tolerance,
+                    )
+                )
             )
         )
         high_matches = desired_real_high is None or (
             current_real_high is not None
-            and math.isclose(
-                current_real_high, desired_real_high, abs_tol=target_tolerance
+            and (
+                math.isclose(
+                    current_real_high, desired_real_high, abs_tol=target_tolerance
+                )
+                or (
+                    self._last_commanded_real_target_high is not None
+                    and self._last_snapped_real_target_high is not None
+                    and math.isclose(
+                        desired_real_high,
+                        self._last_commanded_real_target_high,
+                        abs_tol=target_tolerance,
+                    )
+                    and math.isclose(
+                        current_real_high,
+                        self._last_snapped_real_target_high,
+                        abs_tol=target_tolerance,
+                    )
+                )
             )
         )
 
@@ -2832,7 +3130,32 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         previous_state = (
             self._last_real_write_time,
             self._suppress_sync_logs_until,
+            self._last_commanded_real_target_low,
+            self._last_snapped_real_target_low,
+            self._last_commanded_real_target_high,
+            self._last_snapped_real_target_high,
         )
+
+        step_size = self.target_temperature_step or 0
+        loose_tolerance = max(PENDING_REQUEST_TOLERANCE_MAX, step_size * 0.75)
+
+        if desired_real_low is not None:
+            self._last_commanded_real_target_low = desired_real_low
+            if current_real_low is not None and math.isclose(
+                current_real_low, desired_real_low, abs_tol=loose_tolerance
+            ):
+                self._last_snapped_real_target_low = current_real_low
+            else:
+                self._last_snapped_real_target_low = None
+
+        if desired_real_high is not None:
+            self._last_commanded_real_target_high = desired_real_high
+            if current_real_high is not None and math.isclose(
+                current_real_high, desired_real_high, abs_tol=loose_tolerance
+            ):
+                self._last_snapped_real_target_high = current_real_high
+            else:
+                self._last_snapped_real_target_high = None
 
         self._last_real_write_time = time.monotonic()
         self._start_auto_sync_log_suppression()
@@ -2848,6 +3171,10 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             (
                 self._last_real_write_time,
                 self._suppress_sync_logs_until,
+                self._last_commanded_real_target_low,
+                self._last_snapped_real_target_low,
+                self._last_commanded_real_target_high,
+                self._last_snapped_real_target_high,
             ) = previous_state
             if desired_real_low is not None:
                 self._remove_real_target_request(desired_real_low)
