@@ -31,9 +31,14 @@ from custom_components.thermostat_proxy.const import (
     DEFAULT_MAX_SYNC_OFFSET,
     DEFAULT_SENSOR_LAST_ACTIVE,
     DOMAIN,
+    PHYSICAL_SENSOR_NAME,
     TARGET_CHANGE_BEHAVIOR_AUTO_SWITCH,
     TARGET_CHANGE_BEHAVIOR_DISABLE_AUTO_SWITCH,
     TARGET_CHANGE_BEHAVIOR_PRESERVE_VIRTUAL_TARGET,
+)
+from custom_components.thermostat_proxy.helpers import (
+    extract_entity_config,
+    extract_runtime_settings,
 )
 from homeassistant.core import HomeAssistant
 
@@ -486,3 +491,251 @@ async def test_async_setup_entry_invalid_default_sensor_fallback(
         f"Default sensor 'MissingSensor' not in config entry {entry.entry_id}"
         in caplog.text
     )
+
+
+@pytest.mark.asyncio
+async def test_max_sync_offset_zero_disables_clamping_and_allows_delta(
+    hass: HomeAssistant,
+) -> None:
+    """Test that max_sync_offset=0 does not pin target to ref_target and allows deltas."""
+    hass.states.async_set(
+        "climate.real",
+        "heat",
+        {
+            "current_temperature": 20.0,
+            "temperature": 20.0,
+            "min_temp": 5.0,
+            "max_temp": 35.0,
+            "target_temp_step": 1.0,
+            "supported_features": 1,  # TARGET_TEMPERATURE
+        },
+    )
+    hass.states.async_set("sensor.remote", "15.0")
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Proxy",
+        data={
+            CONF_THERMOSTAT: "climate.real",
+            CONF_SENSORS: [{"name": "Remote", "entity_id": "sensor.remote"}],
+        },
+        options={
+            CONF_MAX_SYNC_OFFSET: 0,
+            CONF_DISABLE_AUTO_SWITCH: True,
+            CONF_OVERDRIVE_OFFSET: 0.0,
+        },
+        source="user",
+        unique_id="proxy_offset_zero",
+    )
+    entry.add_to_hass(hass)
+
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    component = hass.data["climate"]
+    entity = component.get_entity("climate.thermostat_proxy")
+    assert entity is not None
+    assert entity._max_sync_offset is None
+
+    # Direct safety clamp check: with max_sync_offset disabled (None),
+    # an offset of +5.0 (calculated 25.0 vs ref 20.0) or -5.0 (15.0 vs ref 20.0)
+    # is NOT clamped to ref_target 20.0.
+    assert entity._apply_safety_clamp(25.0, reference_target=20.0) == 25.0
+    assert entity._apply_safety_clamp(15.0, reference_target=20.0) == 15.0
+
+    # Wait for target realignment task
+    await hass.async_block_till_done()
+
+    # Set virtual target temperature to 20.0.
+    # Remote sensor is 15.0, delta is 20.0 - 15.0 = +5.0 degrees.
+    # Real current is 20.0, so real target should adjust to 20.0 + 5.0 = 25.0 degrees.
+    # If max_sync_offset=0 pinned or clamped to ref_target (20.0 ± 0), real target would stay 20.0.
+    await entity.async_set_temperature(temperature=20.0)
+    await hass.async_block_till_done()
+
+    assert entity._last_commanded_real_target == 25.0
+    proxy_state = hass.states.get("climate.thermostat_proxy")
+    assert proxy_state is not None
+    assert proxy_state.attributes["real_target_temperature"] == 25.0
+
+    # Test cooling delta (-5.0 degrees)
+    hass.states.async_set("sensor.remote", "25.0")
+    entity._last_real_write_time -= 46.0  # clear write grace period
+
+    # Remote sensor is 25.0, virtual target is 20.0, delta is 20.0 - 25.0 = -5.0 degrees.
+    # Real current is 20.0, so real target should adjust to 20.0 + (-5.0) = 15.0 degrees.
+    await entity.async_set_temperature(temperature=20.0)
+    await hass.async_block_till_done()
+
+    assert entity._last_commanded_real_target == 15.0
+    proxy_state = hass.states.get("climate.thermostat_proxy")
+    assert proxy_state is not None
+    assert proxy_state.attributes["real_target_temperature"] == 15.0
+
+
+def test_extract_runtime_settings_behaviors_and_offsets() -> None:
+    """Test extract_runtime_settings behavior resolution, legacy flags, and offset normalization."""
+    # 1. Behavior selector values
+    cfg_auto = extract_runtime_settings(
+        {CONF_PHYSICAL_TARGET_CHANGE_BEHAVIOR: TARGET_CHANGE_BEHAVIOR_AUTO_SWITCH}
+    )
+    assert cfg_auto[CONF_DISABLE_AUTO_SWITCH] is False
+    assert cfg_auto[CONF_PRESERVE_VIRTUAL_TARGET] is False
+
+    cfg_disable = extract_runtime_settings(
+        {
+            CONF_PHYSICAL_TARGET_CHANGE_BEHAVIOR: TARGET_CHANGE_BEHAVIOR_DISABLE_AUTO_SWITCH
+        }
+    )
+    assert cfg_disable[CONF_DISABLE_AUTO_SWITCH] is True
+    assert cfg_disable[CONF_PRESERVE_VIRTUAL_TARGET] is False
+
+    cfg_preserve = extract_runtime_settings(
+        {
+            CONF_PHYSICAL_TARGET_CHANGE_BEHAVIOR: TARGET_CHANGE_BEHAVIOR_PRESERVE_VIRTUAL_TARGET
+        }
+    )
+    assert cfg_preserve[CONF_DISABLE_AUTO_SWITCH] is True
+    assert cfg_preserve[CONF_PRESERVE_VIRTUAL_TARGET] is True
+
+    # 2. Legacy boolean flags when behavior is omitted
+    cfg_legacy_true_true = extract_runtime_settings(
+        {CONF_DISABLE_AUTO_SWITCH: True, CONF_PRESERVE_VIRTUAL_TARGET: True}
+    )
+    assert cfg_legacy_true_true[CONF_DISABLE_AUTO_SWITCH] is True
+    assert cfg_legacy_true_true[CONF_PRESERVE_VIRTUAL_TARGET] is True
+
+    cfg_legacy_true_false = extract_runtime_settings(
+        {CONF_DISABLE_AUTO_SWITCH: True, CONF_PRESERVE_VIRTUAL_TARGET: False}
+    )
+    assert cfg_legacy_true_false[CONF_DISABLE_AUTO_SWITCH] is True
+    assert cfg_legacy_true_false[CONF_PRESERVE_VIRTUAL_TARGET] is False
+
+    cfg_legacy_false = extract_runtime_settings(
+        {CONF_DISABLE_AUTO_SWITCH: False, CONF_PRESERVE_VIRTUAL_TARGET: False}
+    )
+    assert cfg_legacy_false[CONF_DISABLE_AUTO_SWITCH] is False
+    assert cfg_legacy_false[CONF_PRESERVE_VIRTUAL_TARGET] is False
+
+    # Behavior key takes precedence over legacy flags if both present
+    cfg_both = extract_runtime_settings(
+        {
+            CONF_PHYSICAL_TARGET_CHANGE_BEHAVIOR: TARGET_CHANGE_BEHAVIOR_AUTO_SWITCH,
+            CONF_DISABLE_AUTO_SWITCH: True,
+            CONF_PRESERVE_VIRTUAL_TARGET: True,
+        }
+    )
+    assert cfg_both[CONF_DISABLE_AUTO_SWITCH] is False
+    assert cfg_both[CONF_PRESERVE_VIRTUAL_TARGET] is False
+
+    # 3. max_sync_offset conversions
+    assert (
+        extract_runtime_settings({CONF_MAX_SYNC_OFFSET: 0})[CONF_MAX_SYNC_OFFSET]
+        is None
+    )
+    assert (
+        extract_runtime_settings({CONF_MAX_SYNC_OFFSET: 0.0})[CONF_MAX_SYNC_OFFSET]
+        is None
+    )
+    assert (
+        extract_runtime_settings({CONF_MAX_SYNC_OFFSET: "0"})[CONF_MAX_SYNC_OFFSET]
+        is None
+    )
+    assert (
+        extract_runtime_settings({CONF_MAX_SYNC_OFFSET: None})[CONF_MAX_SYNC_OFFSET]
+        is None
+    )
+    assert (
+        extract_runtime_settings({CONF_MAX_SYNC_OFFSET: 5.5})[CONF_MAX_SYNC_OFFSET]
+        == 5.5
+    )
+    assert extract_runtime_settings({})[CONF_MAX_SYNC_OFFSET] == DEFAULT_MAX_SYNC_OFFSET
+
+    # 4. default_sensor vs last active
+    cfg_last = extract_runtime_settings(
+        {CONF_DEFAULT_SENSOR: DEFAULT_SENSOR_LAST_ACTIVE}
+    )
+    assert cfg_last[CONF_DEFAULT_SENSOR] is None
+    assert cfg_last["use_last_active_sensor"] is True
+
+    cfg_sensor = extract_runtime_settings({CONF_DEFAULT_SENSOR: "Remote Sensor"})
+    assert cfg_sensor[CONF_DEFAULT_SENSOR] == "Remote Sensor"
+    assert cfg_sensor["use_last_active_sensor"] is False
+
+
+def test_extract_entity_config_physical_sensor_name() -> None:
+    """Test extract_entity_config physical sensor name resolution."""
+    # Explicit parameter passed
+    cfg_explicit = extract_entity_config(
+        {},
+        physical_sensor_name="Explicit Thermostat",
+    )
+    assert cfg_explicit["physical_sensor_name"] == "Explicit Thermostat"
+
+    # Explicit parameter overrides config dict value
+    cfg_override = extract_entity_config(
+        {CONF_PHYSICAL_SENSOR_NAME: "From Config"},
+        physical_sensor_name="Explicit Overrides",
+    )
+    assert cfg_override["physical_sensor_name"] == "Explicit Overrides"
+
+    # Derived from config dict when explicit parameter is None
+    cfg_config = extract_entity_config(
+        {CONF_PHYSICAL_SENSOR_NAME: "From Config"},
+        physical_sensor_name=None,
+    )
+    assert cfg_config["physical_sensor_name"] == "From Config"
+
+    # Default fallback when neither is provided
+    cfg_default = extract_entity_config({})
+    assert cfg_default["physical_sensor_name"] == PHYSICAL_SENSOR_NAME
+
+
+def test_extract_entity_config_default_sensor_fallback_and_offsets(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Test extract_entity_config default sensor validation warning and offset parsing."""
+    valid_sensors = ["Living Room", "Bedroom"]
+
+    # Invalid sensor with entry_id logs source with entry_id
+    caplog.clear()
+    cfg_entry = extract_entity_config(
+        {CONF_DEFAULT_SENSOR: "Kitchen"},
+        valid_sensor_names=valid_sensors,
+        entry_id="entry_456",
+    )
+    assert cfg_entry["default_sensor"] is None
+    assert (
+        "Default sensor 'Kitchen' not in config entry entry_456; falling back to first sensor"
+        in caplog.text
+    )
+
+    # Invalid sensor without entry_id logs source as 'configuration'
+    caplog.clear()
+    cfg_no_entry = extract_entity_config(
+        {CONF_DEFAULT_SENSOR: "Kitchen"},
+        valid_sensor_names=valid_sensors,
+        entry_id=None,
+    )
+    assert cfg_no_entry["default_sensor"] is None
+    assert (
+        "Default sensor 'Kitchen' not in configuration; falling back to first sensor"
+        in caplog.text
+    )
+
+    # Valid sensor in valid_sensors produces no warning
+    caplog.clear()
+    cfg_valid = extract_entity_config(
+        {CONF_DEFAULT_SENSOR: "Living Room"},
+        valid_sensor_names=valid_sensors,
+        entry_id="entry_456",
+    )
+    assert cfg_valid["default_sensor"] == "Living Room"
+    assert "Default sensor" not in caplog.text
+
+    # max_sync_offset: 0 and 0.0 converted to None
+    cfg_zero = extract_entity_config({CONF_MAX_SYNC_OFFSET: 0})
+    assert cfg_zero["max_sync_offset"] is None
+
+    cfg_zero_float = extract_entity_config({CONF_MAX_SYNC_OFFSET: 0.0})
+    assert cfg_zero_float["max_sync_offset"] is None

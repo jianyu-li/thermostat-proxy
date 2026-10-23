@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 import contextlib
 from dataclasses import dataclass
 import datetime
@@ -56,7 +56,6 @@ from homeassistant.helpers.event import async_call_later, async_track_state_chan
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
-from .config_flow import _target_change_flags_from_behavior
 from .const import (
     ATTR_ACTIVE_HUMIDITY_SENSOR,
     ATTR_ACTIVE_HUMIDITY_SENSOR_ENTITY_ID,
@@ -93,15 +92,15 @@ from .const import (
     DEFAULT_DISABLE_AUTO_SWITCH,
     DEFAULT_HUMIDITY_DEADBAND,
     DEFAULT_MAX_HUMIDITY_OVERCOOL,
-    DEFAULT_MAX_SYNC_OFFSET,
     DEFAULT_MIN_DUAL_TEMP_SPREAD_CELSIUS,
     DEFAULT_MIN_DUAL_TEMP_SPREAD_FAHRENHEIT,
     DEFAULT_NAME,
     DEFAULT_OVERDRIVE_OFFSET,
     DEFAULT_PRESERVE_VIRTUAL_TARGET,
     DEFAULT_SENSOR_CHANGE_THRESHOLD,
-    DEFAULT_SENSOR_LAST_ACTIVE,
     DEFAULT_TARGET_HUMIDITY,
+    MAX_TARGET_HUMIDITY,
+    MIN_TARGET_HUMIDITY,
     OVERDRIVE_ADJUSTMENT_COOL,
     PHYSICAL_SENSOR_NAME,
     PHYSICAL_SENSOR_SENTINEL,
@@ -112,6 +111,9 @@ from .const import (
     UNINITIALIZED_TEMP_CELSIUS,
     UNINITIALIZED_TEMP_FAHRENHEIT,
 )
+from .helpers import extract_entity_config
+
+_extract_entity_config = extract_entity_config
 
 # Defined locally because homeassistant.components.climate.const does not
 # export these constants in all supported HA versions.
@@ -213,84 +215,16 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
         ): vol.Coerce(float),
         vol.Optional(
             CONF_DEFAULT_TARGET_HUMIDITY, default=DEFAULT_TARGET_HUMIDITY
-        ): vol.All(vol.Coerce(int), vol.Range(min=30, max=99)),
+        ): vol.All(
+            vol.Coerce(int),
+            vol.Range(min=MIN_TARGET_HUMIDITY, max=MAX_TARGET_HUMIDITY),
+        ),
         vol.Optional(CONF_MIN_DUAL_TEMP_SPREAD): vol.Coerce(float),
         vol.Optional(
             CONF_OVERDRIVE_OFFSET, default=DEFAULT_OVERDRIVE_OFFSET
         ): vol.Coerce(float),
     }
 )
-
-
-def _extract_entity_config(
-    config: Mapping[str, Any],
-    valid_sensor_names: list[str] | None = None,
-    entry_id: str | None = None,
-) -> dict[str, Any]:
-    """Extract and resolve entity configuration settings."""
-    physical_sensor_name = config.get(CONF_PHYSICAL_SENSOR_NAME, PHYSICAL_SENSOR_NAME)
-
-    raw_default_sensor = config.get(CONF_DEFAULT_SENSOR)
-    use_last_active_sensor = config.get(CONF_USE_LAST_ACTIVE_SENSOR, False)
-    if raw_default_sensor == DEFAULT_SENSOR_LAST_ACTIVE:
-        use_last_active_sensor = True
-        default_sensor = None
-    else:
-        default_sensor = raw_default_sensor
-
-    if (
-        valid_sensor_names is not None
-        and default_sensor
-        and default_sensor not in valid_sensor_names
-    ):
-        if entry_id:
-            _LOGGER.warning(
-                "Default sensor '%s' not in config entry %s; falling back to first sensor",
-                default_sensor,
-                entry_id,
-            )
-        else:
-            _LOGGER.warning(
-                "Default sensor '%s' not in valid sensors; falling back to first sensor",
-                default_sensor,
-            )
-        default_sensor = None
-
-    behavior = config.get(CONF_PHYSICAL_TARGET_CHANGE_BEHAVIOR)
-    if behavior is not None:
-        disable_auto_switch, preserve_virtual_target = (
-            _target_change_flags_from_behavior(behavior)
-        )
-    else:
-        disable_auto_switch = config.get(
-            CONF_DISABLE_AUTO_SWITCH, DEFAULT_DISABLE_AUTO_SWITCH
-        )
-        preserve_virtual_target = config.get(
-            CONF_PRESERVE_VIRTUAL_TARGET, DEFAULT_PRESERVE_VIRTUAL_TARGET
-        )
-
-    return {
-        "physical_sensor_name": physical_sensor_name,
-        "default_sensor": default_sensor,
-        "use_last_active_sensor": use_last_active_sensor,
-        "disable_auto_switch": disable_auto_switch,
-        "preserve_virtual_target": preserve_virtual_target,
-        "cooldown_period": config.get(CONF_COOLDOWN_PERIOD, DEFAULT_COOLDOWN_PERIOD),
-        "user_min_temp": config.get(CONF_MIN_TEMP),
-        "user_max_temp": config.get(CONF_MAX_TEMP),
-        "max_sync_offset": config.get(CONF_MAX_SYNC_OFFSET, DEFAULT_MAX_SYNC_OFFSET),
-        "sensor_change_threshold": config.get(
-            CONF_SENSOR_CHANGE_THRESHOLD, DEFAULT_SENSOR_CHANGE_THRESHOLD
-        ),
-        "max_humidity_overcool": config.get(
-            CONF_MAX_HUMIDITY_OVERCOOL, DEFAULT_MAX_HUMIDITY_OVERCOOL
-        ),
-        "default_target_humidity": config.get(
-            CONF_DEFAULT_TARGET_HUMIDITY, DEFAULT_TARGET_HUMIDITY
-        ),
-        "min_dual_temp_spread": config.get(CONF_MIN_DUAL_TEMP_SPREAD),
-        "overdrive_offset": config.get(CONF_OVERDRIVE_OFFSET, DEFAULT_OVERDRIVE_OFFSET),
-    }
 
 
 async def async_setup_platform(
@@ -300,7 +234,7 @@ async def async_setup_platform(
     discovery_info: DiscoveryInfoType | None = None,
 ) -> None:
     """Set up a Thermostat Proxy entity from YAML."""
-    entity_config = _extract_entity_config(config)
+    entity_config = extract_entity_config(config)
 
     async_add_entities(
         [
@@ -337,8 +271,11 @@ async def async_setup_entry(
     if physical_sensor_name not in valid_sensor_names:
         valid_sensor_names.append(physical_sensor_name)
 
-    entity_config = _extract_entity_config(
-        config, valid_sensor_names=valid_sensor_names, entry_id=entry.entry_id
+    entity_config = extract_entity_config(
+        config,
+        valid_sensor_names=valid_sensor_names,
+        entry_id=entry.entry_id,
+        physical_sensor_name=physical_sensor_name,
     )
 
     async_add_entities(
@@ -3559,7 +3496,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         )
 
         # 1. Enforce max_sync_offset relative to the reference target temperature
-        if self._max_sync_offset is not None and ref_target is not None:
+        if self._max_sync_offset and ref_target is not None:
             min_allowed_offset = ref_target - self._max_sync_offset
             max_allowed_offset = ref_target + self._max_sync_offset
 
