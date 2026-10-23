@@ -78,6 +78,7 @@ from .const import (
     CONF_MIN_TEMP,
     CONF_OVERDRIVE_OFFSET,
     CONF_PHYSICAL_SENSOR_NAME,
+    CONF_PHYSICAL_TARGET_CHANGE_BEHAVIOR,
     CONF_PRESERVE_VIRTUAL_TARGET,
     CONF_SENSOR_CHANGE_THRESHOLD,
     CONF_SENSOR_ENTITY_ID,
@@ -91,22 +92,28 @@ from .const import (
     DEFAULT_DISABLE_AUTO_SWITCH,
     DEFAULT_HUMIDITY_DEADBAND,
     DEFAULT_MAX_HUMIDITY_OVERCOOL,
-    DEFAULT_MAX_SYNC_OFFSET,
     DEFAULT_MIN_DUAL_TEMP_SPREAD_CELSIUS,
     DEFAULT_MIN_DUAL_TEMP_SPREAD_FAHRENHEIT,
     DEFAULT_NAME,
     DEFAULT_OVERDRIVE_OFFSET,
     DEFAULT_PRESERVE_VIRTUAL_TARGET,
     DEFAULT_SENSOR_CHANGE_THRESHOLD,
-    DEFAULT_SENSOR_LAST_ACTIVE,
     DEFAULT_TARGET_HUMIDITY,
+    MAX_TARGET_HUMIDITY,
+    MIN_TARGET_HUMIDITY,
     OVERDRIVE_ADJUSTMENT_COOL,
     PHYSICAL_SENSOR_NAME,
     PHYSICAL_SENSOR_SENTINEL,
     SYNC_LOG_SUPPRESSION_PADDING_SEC,
+    TARGET_CHANGE_BEHAVIOR_AUTO_SWITCH,
+    TARGET_CHANGE_BEHAVIOR_DISABLE_AUTO_SWITCH,
+    TARGET_CHANGE_BEHAVIOR_PRESERVE_VIRTUAL_TARGET,
     UNINITIALIZED_TEMP_CELSIUS,
     UNINITIALIZED_TEMP_FAHRENHEIT,
 )
+from .helpers import extract_entity_config
+
+_extract_entity_config = extract_entity_config
 
 # Defined locally because homeassistant.components.climate.const does not
 # export these constants in all supported HA versions.
@@ -193,9 +200,25 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
         vol.Optional(
             CONF_PRESERVE_VIRTUAL_TARGET, default=DEFAULT_PRESERVE_VIRTUAL_TARGET
         ): cv.boolean,
+        vol.Optional(CONF_PHYSICAL_TARGET_CHANGE_BEHAVIOR): vol.In(
+            [
+                TARGET_CHANGE_BEHAVIOR_AUTO_SWITCH,
+                TARGET_CHANGE_BEHAVIOR_DISABLE_AUTO_SWITCH,
+                TARGET_CHANGE_BEHAVIOR_PRESERVE_VIRTUAL_TARGET,
+            ]
+        ),
         vol.Optional(
             CONF_SENSOR_CHANGE_THRESHOLD, default=DEFAULT_SENSOR_CHANGE_THRESHOLD
         ): vol.Coerce(float),
+        vol.Optional(
+            CONF_MAX_HUMIDITY_OVERCOOL, default=DEFAULT_MAX_HUMIDITY_OVERCOOL
+        ): vol.Coerce(float),
+        vol.Optional(
+            CONF_DEFAULT_TARGET_HUMIDITY, default=DEFAULT_TARGET_HUMIDITY
+        ): vol.All(
+            vol.Coerce(int),
+            vol.Range(min=MIN_TARGET_HUMIDITY, max=MAX_TARGET_HUMIDITY),
+        ),
         vol.Optional(CONF_MIN_DUAL_TEMP_SPREAD): vol.Coerce(float),
         vol.Optional(
             CONF_OVERDRIVE_OFFSET, default=DEFAULT_OVERDRIVE_OFFSET
@@ -211,51 +234,17 @@ async def async_setup_platform(
     discovery_info: DiscoveryInfoType | None = None,
 ) -> None:
     """Set up a Thermostat Proxy entity from YAML."""
-
-    default_sensor = config.get(CONF_DEFAULT_SENSOR)
-    use_last_active_sensor = config.get(CONF_USE_LAST_ACTIVE_SENSOR, False)
-    if default_sensor == DEFAULT_SENSOR_LAST_ACTIVE:
-        use_last_active_sensor = True
-        default_sensor = None
+    entity_config = extract_entity_config(config)
 
     async_add_entities(
         [
             CustomThermostatEntity(
                 hass=hass,
-                name=config[CONF_NAME],
+                name=config.get(CONF_NAME, DEFAULT_NAME),
                 real_thermostat=config[CONF_THERMOSTAT],
                 sensors=config[CONF_SENSORS],
-                default_sensor=default_sensor,
                 unique_id=config.get(CONF_UNIQUE_ID),
-                physical_sensor_name=config.get(
-                    CONF_PHYSICAL_SENSOR_NAME, PHYSICAL_SENSOR_NAME
-                ),
-                use_last_active_sensor=use_last_active_sensor,
-                cooldown_period=config.get(
-                    CONF_COOLDOWN_PERIOD, DEFAULT_COOLDOWN_PERIOD
-                ),
-                user_min_temp=config.get(CONF_MIN_TEMP),
-                user_max_temp=config.get(CONF_MAX_TEMP),
-                max_sync_offset=config.get(CONF_MAX_SYNC_OFFSET),
-                disable_auto_switch=config.get(
-                    CONF_DISABLE_AUTO_SWITCH, DEFAULT_DISABLE_AUTO_SWITCH
-                ),
-                preserve_virtual_target=config.get(
-                    CONF_PRESERVE_VIRTUAL_TARGET, DEFAULT_PRESERVE_VIRTUAL_TARGET
-                ),
-                sensor_change_threshold=config.get(
-                    CONF_SENSOR_CHANGE_THRESHOLD, DEFAULT_SENSOR_CHANGE_THRESHOLD
-                ),
-                max_humidity_overcool=config.get(
-                    CONF_MAX_HUMIDITY_OVERCOOL, DEFAULT_MAX_HUMIDITY_OVERCOOL
-                ),
-                default_target_humidity=config.get(
-                    CONF_DEFAULT_TARGET_HUMIDITY, DEFAULT_TARGET_HUMIDITY
-                ),
-                min_dual_temp_spread=config.get(CONF_MIN_DUAL_TEMP_SPREAD),
-                overdrive_offset=config.get(
-                    CONF_OVERDRIVE_OFFSET, DEFAULT_OVERDRIVE_OFFSET
-                ),
+                **entity_config,
             )
         ]
     )
@@ -267,7 +256,6 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up a Thermostat Proxy entity from a config entry."""
-
     data = entry.data
     sensors = data.get(CONF_SENSORS) or []
     if not sensors:
@@ -277,76 +265,18 @@ async def async_setup_entry(
         )
         return
 
-    raw_default_sensor = entry.options.get(CONF_DEFAULT_SENSOR) or data.get(
-        CONF_DEFAULT_SENSOR
-    )
-    physical_sensor_name = data.get(CONF_PHYSICAL_SENSOR_NAME, PHYSICAL_SENSOR_NAME)
+    config = {**entry.data, **entry.options}
+    physical_sensor_name = config.get(CONF_PHYSICAL_SENSOR_NAME, PHYSICAL_SENSOR_NAME)
     valid_sensor_names = [sensor[CONF_SENSOR_NAME] for sensor in sensors]
     if physical_sensor_name not in valid_sensor_names:
         valid_sensor_names.append(physical_sensor_name)
 
-    use_last_active_sensor = entry.options.get(
-        CONF_USE_LAST_ACTIVE_SENSOR,
-        data.get(CONF_USE_LAST_ACTIVE_SENSOR, False),
+    entity_config = extract_entity_config(
+        config,
+        valid_sensor_names=valid_sensor_names,
+        entry_id=entry.entry_id,
+        physical_sensor_name=physical_sensor_name,
     )
-    cooldown_period = entry.options.get(
-        CONF_COOLDOWN_PERIOD,
-        data.get(CONF_COOLDOWN_PERIOD, DEFAULT_COOLDOWN_PERIOD),
-    )
-    user_min_temp = entry.options.get(
-        CONF_MIN_TEMP,
-        data.get(CONF_MIN_TEMP),
-    )
-    user_max_temp = entry.options.get(
-        CONF_MAX_TEMP,
-        data.get(CONF_MAX_TEMP),
-    )
-    max_sync_offset = entry.options.get(
-        CONF_MAX_SYNC_OFFSET,
-        data.get(CONF_MAX_SYNC_OFFSET, DEFAULT_MAX_SYNC_OFFSET),
-    )
-    disable_auto_switch = entry.options.get(
-        CONF_DISABLE_AUTO_SWITCH,
-        data.get(CONF_DISABLE_AUTO_SWITCH, DEFAULT_DISABLE_AUTO_SWITCH),
-    )
-    sensor_change_threshold = entry.options.get(
-        CONF_SENSOR_CHANGE_THRESHOLD,
-        data.get(CONF_SENSOR_CHANGE_THRESHOLD, DEFAULT_SENSOR_CHANGE_THRESHOLD),
-    )
-    max_humidity_overcool = entry.options.get(
-        CONF_MAX_HUMIDITY_OVERCOOL,
-        data.get(CONF_MAX_HUMIDITY_OVERCOOL, DEFAULT_MAX_HUMIDITY_OVERCOOL),
-    )
-    default_target_humidity = entry.options.get(
-        CONF_DEFAULT_TARGET_HUMIDITY,
-        data.get(CONF_DEFAULT_TARGET_HUMIDITY, DEFAULT_TARGET_HUMIDITY),
-    )
-    min_dual_temp_spread = entry.options.get(
-        CONF_MIN_DUAL_TEMP_SPREAD,
-        data.get(CONF_MIN_DUAL_TEMP_SPREAD),
-    )
-    overdrive_offset = entry.options.get(
-        CONF_OVERDRIVE_OFFSET,
-        data.get(CONF_OVERDRIVE_OFFSET, DEFAULT_OVERDRIVE_OFFSET),
-    )
-    preserve_virtual_target = entry.options.get(
-        CONF_PRESERVE_VIRTUAL_TARGET,
-        data.get(CONF_PRESERVE_VIRTUAL_TARGET, DEFAULT_PRESERVE_VIRTUAL_TARGET),
-    )
-
-    if raw_default_sensor == DEFAULT_SENSOR_LAST_ACTIVE:
-        use_last_active_sensor = True
-        default_sensor = None
-    else:
-        default_sensor = raw_default_sensor
-
-    if default_sensor and default_sensor not in valid_sensor_names:
-        _LOGGER.warning(
-            "Default sensor '%s' not in config entry %s; falling back to first sensor",
-            default_sensor,
-            entry.entry_id,
-        )
-        default_sensor = None
 
     async_add_entities(
         [
@@ -355,21 +285,8 @@ async def async_setup_entry(
                 name=data.get(CONF_NAME, DEFAULT_NAME),
                 real_thermostat=data[CONF_THERMOSTAT],
                 sensors=sensors,
-                default_sensor=default_sensor,
                 unique_id=data.get(CONF_UNIQUE_ID) or entry.entry_id,
-                physical_sensor_name=physical_sensor_name,
-                use_last_active_sensor=use_last_active_sensor,
-                cooldown_period=cooldown_period,
-                user_min_temp=user_min_temp,
-                user_max_temp=user_max_temp,
-                max_sync_offset=max_sync_offset,
-                disable_auto_switch=disable_auto_switch,
-                preserve_virtual_target=preserve_virtual_target,
-                sensor_change_threshold=sensor_change_threshold,
-                max_humidity_overcool=max_humidity_overcool,
-                default_target_humidity=default_target_humidity,
-                min_dual_temp_spread=min_dual_temp_spread,
-                overdrive_offset=overdrive_offset,
+                **entity_config,
             )
         ]
     )
@@ -3579,7 +3496,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         )
 
         # 1. Enforce max_sync_offset relative to the reference target temperature
-        if self._max_sync_offset is not None and ref_target is not None:
+        if self._max_sync_offset and ref_target is not None:
             min_allowed_offset = ref_target - self._max_sync_offset
             max_allowed_offset = ref_target + self._max_sync_offset
 
