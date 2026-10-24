@@ -18,6 +18,7 @@ from homeassistant.components.climate import PLATFORM_SCHEMA, ClimateEntity
 from homeassistant.components.climate.const import (
     ATTR_CURRENT_HUMIDITY,
     ATTR_CURRENT_TEMPERATURE,
+    ATTR_FAN_MODE,
     ATTR_HVAC_ACTION,
     ATTR_HVAC_MODE,
     ATTR_MAX_TEMP,
@@ -26,6 +27,7 @@ from homeassistant.components.climate.const import (
     ATTR_TARGET_TEMP_LOW,
     ATTR_TARGET_TEMP_STEP,
     DOMAIN as CLIMATE_DOMAIN,
+    SERVICE_SET_FAN_MODE,
     SERVICE_SET_HVAC_MODE,
     SERVICE_SET_TEMPERATURE,
     ClimateEntityFeature,
@@ -104,7 +106,6 @@ from .const import (
     OVERDRIVE_ADJUSTMENT_COOL,
     PHYSICAL_SENSOR_NAME,
     PHYSICAL_SENSOR_SENTINEL,
-    SYNC_LOG_SUPPRESSION_PADDING_SEC,
     TARGET_CHANGE_BEHAVIOR_AUTO_SWITCH,
     TARGET_CHANGE_BEHAVIOR_DISABLE_AUTO_SWITCH,
     TARGET_CHANGE_BEHAVIOR_PRESERVE_VIRTUAL_TARGET,
@@ -402,7 +403,6 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self._entity_health: dict[str, bool] = {}
         self._command_lock = asyncio.Lock()
         self._sensor_realign_task: asyncio.Task | None = None
-        self._suppress_sync_logs_until: float | None = None
         self._realign_trigger_source: str | None = None
         self._cooldown_timer_unsub: Callable[[], None] | None = None
         self._sensor_precisions: dict[str, float] = {}
@@ -1615,7 +1615,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 return int(self._real_state.attributes[ATTR_MIN_HUMIDITY])
             except (ValueError, TypeError):
                 pass
-        return 30
+        return MIN_TARGET_HUMIDITY
 
     @property
     def max_humidity(self) -> int:
@@ -1624,7 +1624,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 return int(self._real_state.attributes[ATTR_MAX_HUMIDITY])
             except (ValueError, TypeError):
                 pass
-        return 99
+        return MAX_TARGET_HUMIDITY
 
     @property
     def is_range_mode(self) -> bool:
@@ -1886,7 +1886,6 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     self._last_snapped_real_target_low = None
 
                 self._last_real_write_time = time.monotonic()
-                self._start_auto_sync_log_suppression()
 
                 await self.hass.services.async_call(
                     CLIMATE_DOMAIN,
@@ -1981,7 +1980,6 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 previous_state = (
                     self._last_real_target_temp,
                     self._last_real_write_time,
-                    self._suppress_sync_logs_until,
                     self._last_commanded_real_target,
                     self._last_snapped_real_target,
                 )
@@ -1990,7 +1988,6 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 self._last_snapped_real_target = None
                 self._last_real_target_temp = real_target
                 self._last_real_write_time = time.monotonic()
-                self._start_auto_sync_log_suppression()
 
                 await self.hass.services.async_call(
                     CLIMATE_DOMAIN,
@@ -2003,7 +2000,6 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 (
                     self._last_real_target_temp,
                     self._last_real_write_time,
-                    self._suppress_sync_logs_until,
                     self._last_commanded_real_target,
                     self._last_snapped_real_target,
                 ) = previous_state
@@ -2090,11 +2086,6 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
     async def async_set_fan_mode(self, fan_mode: str) -> None:
         """Set new target fan mode."""
-        from homeassistant.components.climate.const import (
-            ATTR_FAN_MODE,
-            SERVICE_SET_FAN_MODE,
-        )
-
         await self.hass.services.async_call(
             CLIMATE_DOMAIN,
             SERVICE_SET_FAN_MODE,
@@ -2366,23 +2357,6 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             },
             blocking=False,
         )
-
-    def _start_auto_sync_log_suppression(self) -> None:
-        """Temporarily silence auto-sync logs after commands we initiate."""
-
-        self._suppress_sync_logs_until = (
-            time.monotonic() + SYNC_LOG_SUPPRESSION_PADDING_SEC
-        )
-
-    def _should_log_auto_sync(self) -> bool:
-        """Return True if we're outside the suppression window."""
-
-        if self._suppress_sync_logs_until is None:
-            return True
-        if time.monotonic() >= self._suppress_sync_logs_until:
-            self._suppress_sync_logs_until = None
-            return True
-        return False
 
     def _did_just_meet_target(self, sensor_temp: float) -> bool:
         """Check if active sensor just crossed/met any target temperature."""
@@ -2712,7 +2686,6 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 previous_state = (
                     self._last_real_target_temp,
                     self._last_real_write_time,
-                    self._suppress_sync_logs_until,
                     self._last_commanded_real_target,
                     self._last_snapped_real_target,
                 )
@@ -2729,7 +2702,6 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
                 self._last_real_target_temp = desired_real_target
                 self._last_real_write_time = time.monotonic()
-                self._start_auto_sync_log_suppression()
 
                 await self.hass.services.async_call(
                     CLIMATE_DOMAIN,
@@ -2745,7 +2717,6 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 (
                     self._last_real_target_temp,
                     self._last_real_write_time,
-                    self._suppress_sync_logs_until,
                     self._last_commanded_real_target,
                     self._last_snapped_real_target,
                 ) = previous_state
@@ -3046,7 +3017,6 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
         previous_state = (
             self._last_real_write_time,
-            self._suppress_sync_logs_until,
             self._last_commanded_real_target_low,
             self._last_snapped_real_target_low,
             self._last_commanded_real_target_high,
@@ -3075,7 +3045,6 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 self._last_snapped_real_target_high = None
 
         self._last_real_write_time = time.monotonic()
-        self._start_auto_sync_log_suppression()
 
         try:
             await self.hass.services.async_call(
@@ -3087,7 +3056,6 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         except Exception as err:
             (
                 self._last_real_write_time,
-                self._suppress_sync_logs_until,
                 self._last_commanded_real_target_low,
                 self._last_snapped_real_target_low,
                 self._last_commanded_real_target_high,

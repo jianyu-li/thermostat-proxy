@@ -651,6 +651,32 @@ def test_extract_runtime_settings_behaviors_and_offsets() -> None:
     )
     assert extract_runtime_settings({})[CONF_MAX_SYNC_OFFSET] == DEFAULT_MAX_SYNC_OFFSET
 
+    # 3b. min_temp, max_temp, and min_dual_temp_spread zero-to-None conversions
+    assert extract_runtime_settings({CONF_MIN_TEMP: 0})[CONF_MIN_TEMP] is None
+    assert extract_runtime_settings({CONF_MIN_TEMP: 0.0})[CONF_MIN_TEMP] is None
+    assert extract_runtime_settings({CONF_MIN_TEMP: 16.5})[CONF_MIN_TEMP] == 16.5
+    assert extract_runtime_settings({CONF_MAX_TEMP: 0})[CONF_MAX_TEMP] is None
+    assert extract_runtime_settings({CONF_MAX_TEMP: 0.0})[CONF_MAX_TEMP] is None
+    assert extract_runtime_settings({CONF_MAX_TEMP: 28.5})[CONF_MAX_TEMP] == 28.5
+    assert (
+        extract_runtime_settings({CONF_MIN_DUAL_TEMP_SPREAD: 0})[
+            CONF_MIN_DUAL_TEMP_SPREAD
+        ]
+        is None
+    )
+    assert (
+        extract_runtime_settings({CONF_MIN_DUAL_TEMP_SPREAD: 0.0})[
+            CONF_MIN_DUAL_TEMP_SPREAD
+        ]
+        is None
+    )
+    assert (
+        extract_runtime_settings({CONF_MIN_DUAL_TEMP_SPREAD: 4.0})[
+            CONF_MIN_DUAL_TEMP_SPREAD
+        ]
+        == 4.0
+    )
+
     # 4. default_sensor vs last active
     cfg_last = extract_runtime_settings(
         {CONF_DEFAULT_SENSOR: DEFAULT_SENSOR_LAST_ACTIVE}

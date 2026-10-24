@@ -81,6 +81,13 @@ def target_change_flags_from_behavior(behavior: str | None) -> tuple[bool, bool]
     return False, False
 
 
+def _nonzero_float_or_none(value: Any) -> float | None:
+    """Return float(value) if value is present and non-zero, otherwise None."""
+    if value is not None and float(value) != 0.0:
+        return float(value)
+    return None
+
+
 def extract_runtime_settings(config: Mapping[str, Any]) -> dict[str, Any]:
     """Extract runtime settings from a mapping (e.g. entry data merged with options)."""
     raw_default_sensor = config.get(CONF_DEFAULT_SENSOR)
@@ -105,18 +112,14 @@ def extract_runtime_settings(config: Mapping[str, Any]) -> dict[str, Any]:
         )
 
     raw_max_sync_offset = config.get(CONF_MAX_SYNC_OFFSET, DEFAULT_MAX_SYNC_OFFSET)
-    max_sync_offset: float | None
-    if raw_max_sync_offset is not None and float(raw_max_sync_offset) != 0.0:
-        max_sync_offset = float(raw_max_sync_offset)
-    else:
-        max_sync_offset = None
+    max_sync_offset = _nonzero_float_or_none(raw_max_sync_offset)
 
     return {
         CONF_DEFAULT_SENSOR: default_sensor,
         CONF_USE_LAST_ACTIVE_SENSOR: use_last_active_sensor,
         CONF_COOLDOWN_PERIOD: config.get(CONF_COOLDOWN_PERIOD, DEFAULT_COOLDOWN_PERIOD),
-        CONF_MIN_TEMP: config.get(CONF_MIN_TEMP),
-        CONF_MAX_TEMP: config.get(CONF_MAX_TEMP),
+        CONF_MIN_TEMP: _nonzero_float_or_none(config.get(CONF_MIN_TEMP)),
+        CONF_MAX_TEMP: _nonzero_float_or_none(config.get(CONF_MAX_TEMP)),
         CONF_MAX_SYNC_OFFSET: max_sync_offset,
         CONF_DISABLE_AUTO_SWITCH: disable_auto_switch,
         CONF_PRESERVE_VIRTUAL_TARGET: preserve_virtual_target,
@@ -129,7 +132,9 @@ def extract_runtime_settings(config: Mapping[str, Any]) -> dict[str, Any]:
         CONF_DEFAULT_TARGET_HUMIDITY: config.get(
             CONF_DEFAULT_TARGET_HUMIDITY, DEFAULT_TARGET_HUMIDITY
         ),
-        CONF_MIN_DUAL_TEMP_SPREAD: config.get(CONF_MIN_DUAL_TEMP_SPREAD),
+        CONF_MIN_DUAL_TEMP_SPREAD: _nonzero_float_or_none(
+            config.get(CONF_MIN_DUAL_TEMP_SPREAD)
+        ),
         CONF_OVERDRIVE_OFFSET: config.get(
             CONF_OVERDRIVE_OFFSET, DEFAULT_OVERDRIVE_OFFSET
         ),

@@ -39,7 +39,9 @@ A Home Assistant custom integration that lets you expose a virtual `climate` ent
 |---|---|---|---|
 | `name` | Yes | `Thermostat Proxy` | The name of the virtual climate entity. |
 | `thermostat` | Yes | | The entity ID of the physical thermostat to wrap. |
-| `target_sensor` | No | | The entity ID of the default temperature sensor to use. If not specified, the proxy will default to the `Physical Entity` preset. |
+| `sensors` | Yes | | List of sensor definitions (`name`, `entity_id`, and optional `humidity_entity_id`). |
+| `default_sensor` | No | | The preset name of the default temperature sensor to activate on startup, or `"__thermostat_proxy_last_active__"` to resume the last active sensor. |
+| `use_last_active_sensor` | No | `False` | Resume with the most recently selected sensor preset across restarts instead of a fixed default. |
 | `physical_sensor_name` | No | `Physical Entity` | The name of the preset representing the physical thermostat itself. |
 | `cooldown_period` | No | `0` (Disabled) | **Minimum Adjustment Interval**: Minimum time (in seconds) between automatic updates to the physical thermostat. Useful for preventing rapid cycling with noisy sensors. Retries automatically when cooldown expires. |
 | `min_temp` | No | `0` (Disabled) | **Minimum Safe Temperature Limit**: Calculated targets sent to the physical thermostat will not go below this value. Set to 0 to disable. |
@@ -67,8 +69,12 @@ A Home Assistant custom integration that lets you expose a virtual `climate` ent
 - All attributes from the physical thermostat are forwarded as extra attributes, alongside:
   - `active_sensor`
   - `active_sensor_entity_id`
+  - `active_humidity_sensor`
+  - `active_humidity_sensor_entity_id`
+  - `humidity_overdrive_active`
   - `real_current_temperature`
   - `real_target_temperature`
+  - `real_current_humidity`
   - `sensor_options`
   - `unavailable_entities`
 
