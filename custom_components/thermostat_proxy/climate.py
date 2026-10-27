@@ -2255,7 +2255,18 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             current_real_target = self._get_real_target_temperature()
             # We must be strict here; if the step is 1.0, 66 vs 67 must be seen as different.
             # Using self.precision (1.0) as tolerance caused isclose(66, 67, abs_tol=1.0) -> True.
-            target_tolerance = REALIGN_TARGET_TOLERANCE
+            #
+            # When the device does not advertise target_temp_step or precision, it may silently
+            # round fractional setpoints to whole degrees (e.g. Z-Wave thermostats).  In that
+            # case the proxy would otherwise loop: it sends 68.4, the device echoes 68.4 then
+            # settles on 68, the echo consumes the pending guard, and the 0.1° tolerance treats
+            # 68 vs 68.4 as a mismatch forever.  Using half of a 1° step (the coarsest common
+            # thermostat resolution) as the tolerance caps the error at 0.5° while still
+            # distinguishing genuinely different whole-degree targets (e.g. 68 vs 69 = 1.0°).
+            if self._target_temp_step is None and self._precision_override is None:
+                target_tolerance = 0.5
+            else:
+                target_tolerance = REALIGN_TARGET_TOLERANCE
 
             # If we are in overdrive, we might be pushing AWAY from the "correct" delta-based target
             # So we should generally update if there's a difference.
@@ -2468,7 +2479,10 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
         current_real_low = self._get_real_target_temperature_low()
         current_real_high = self._get_real_target_temperature_high()
-        target_tolerance = REALIGN_TARGET_TOLERANCE
+        if self._target_temp_step is None and self._precision_override is None:
+            target_tolerance = 0.5
+        else:
+            target_tolerance = REALIGN_TARGET_TOLERANCE
 
         low_matches = desired_real_low is None or (
             current_real_low is not None
