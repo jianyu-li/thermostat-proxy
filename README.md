@@ -163,7 +163,24 @@ mode: single
 
 ## Contributing
 
-Contributions are welcome! Feel free to create a new branch and submit pull a request!
+Contributions are welcome! To ensure smooth review and integration, please follow these guidelines:
+
+1. **Target the `beta` Branch**:
+   - All feature development, bug fixes, and improvements must be branched off of and submitted against **`beta`** (not `main`).
+   - The `main` branch is reserved strictly for stable release tags.
+2. **Automated Testing & Code Quality**:
+   - Ensure all existing and new unit tests pass:
+     ```bash
+     pytest tests/ -v
+     ```
+   - Follow Home Assistant code style standards:
+     ```bash
+     ruff check custom_components/thermostat_proxy
+     black custom_components/thermostat_proxy
+     ```
+3. **Focused Pull Requests**:
+   - Keep pull requests focused on a single topic or bug fix.
+   - For bug fixes, include regression tests covering the reported scenario.
 
 ## Support the project
 
