@@ -2778,11 +2778,6 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             return None, None
         if display_current is not None and real_current is not None:
             delta = constrained - display_current
-            if self._max_sync_offset and abs(delta) > self._max_sync_offset:
-                raise ValueError(
-                    f"Requested target {constrained} requires an offset of {abs(delta)}°, "
-                    f"which exceeds max_sync_offset ({self._max_sync_offset}°)."
-                )
             calc_real = real_current + delta
         else:
             calc_real = constrained
