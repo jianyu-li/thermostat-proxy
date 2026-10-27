@@ -147,3 +147,63 @@ async def test_issue_32_floor_rounding_thermostat_loop(hass, hvac_mode):
     # Check if the proxy switched to the physical sensor due to false external change detection.
     # If the bug is present, it will switch to "Physical". We assert it should NOT switch (preset remains "Remote").
     assert proxy._selected_sensor_name == "Remote"
+
+
+@pytest.mark.asyncio
+async def test_issue_68_zwave_whole_degree_rounding_loop(hass):
+    """Test that the proxy does not loop when a Z-Wave thermostat rounds a fractional
+    setpoint to a whole degree and exposes neither target_temp_step nor precision.
+
+    Scenario: proxy sends 68.4 F, device echoes 68.4 (consuming the pending guard),
+    then settles on 68 F.  Without the fix the 0.1° tolerance treats 68 vs 68.4 as a
+    mismatch and the proxy resends indefinitely.  With the fix the 0.5° tolerance
+    (applied when step is unknown) recognises 68 as the device's rounded result and
+    the realignment check returns without sending again.
+    """
+    proxy = CustomThermostatEntity(
+        hass=hass,
+        name="Test Proxy",
+        real_thermostat="climate.thermostat",
+        sensors=[{"name": "Remote", "entity_id": "sensor.remote"}],
+        default_sensor="Remote",
+        unique_id="test-68",
+        physical_sensor_name="Physical",
+        use_last_active_sensor=False,
+    )
+
+    # Device exposes neither target_temp_step nor precision (Z-Wave JS thermostat)
+    hass.states.async_set(
+        "climate.thermostat",
+        "heat",
+        {
+            "current_temperature": 66,
+            "temperature": 68,
+            "supported_features": ClimateEntityFeature.TARGET_TEMPERATURE,
+        },
+    )
+    proxy._real_state = hass.states.get("climate.thermostat")
+    proxy._update_real_temperature_limits()
+
+    assert proxy._target_temp_step is None
+    assert proxy._precision_override is None
+
+    proxy._temperature_unit = "°F"
+    proxy._sensor_states["sensor.remote"] = State("sensor.remote", "67.6")
+    proxy._sensor_precisions["sensor.remote"] = 0.1
+    proxy._selected_sensor_name = "Remote"
+    proxy._virtual_target_temperature = 69.0
+    proxy.async_write_ha_state = MagicMock()
+
+    # Simulate: proxy previously sent 68.4, device echoed it (consuming the pending
+    # guard), then settled on 68.  The pending list is now empty.
+    proxy._last_real_target_temp = 68.0
+    proxy._last_real_write_time = __import__("time").monotonic() - 4.0  # within grace period
+    proxy._recent_real_target_requests = []  # guard already consumed by the echo
+
+    # The realignment should recognise 68 as the device's rounded result of 68.4 and
+    # not issue another set_temperature call.
+    calls_before = hass.services.async_call.call_count
+    await proxy._async_realign_real_target_from_sensor(trigger_source="real")
+    assert hass.services.async_call.call_count == calls_before, (
+        "Proxy should not resend when device has rounded the fractional setpoint to a whole degree"
+    )
