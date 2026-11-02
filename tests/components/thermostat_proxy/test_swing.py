@@ -1,16 +1,9 @@
 """Tests for swing passthrough."""
 
-from unittest.mock import AsyncMock, MagicMock
-
 import pytest
 
-from homeassistant.components.climate import ClimateEntityFeature, HVACMode
-from homeassistant.core import CoreState, HomeAssistant, State
-
 from custom_components.thermostat_proxy.climate import CustomThermostatEntity
-
-
-
+from homeassistant.components.climate import ClimateEntityFeature, HVACMode
 
 
 def create_proxy(hass):
@@ -31,7 +24,7 @@ def create_proxy(hass):
             "swing_modes": ["stop", "swing"],
             "swing_horizontal_mode": "stop",
             "swing_horizontal_modes": ["stop", "swing"],
-        }
+        },
     )
     proxy = CustomThermostatEntity(
         hass=hass,

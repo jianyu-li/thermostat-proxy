@@ -10,8 +10,6 @@ from custom_components.thermostat_proxy.config_flow import (
     _build_default_sensor_field,
     _extract_entry_runtime_settings,
     _parse_and_validate_runtime_input,
-    _target_change_behavior_from_flags,
-    _target_change_flags_from_behavior,
     _validate_sensor_submission,
 )
 from custom_components.thermostat_proxy.const import (
@@ -41,6 +39,10 @@ from custom_components.thermostat_proxy.const import (
     TARGET_CHANGE_BEHAVIOR_AUTO_SWITCH,
     TARGET_CHANGE_BEHAVIOR_DISABLE_AUTO_SWITCH,
     TARGET_CHANGE_BEHAVIOR_PRESERVE_VIRTUAL_TARGET,
+)
+from custom_components.thermostat_proxy.helpers import (
+    target_change_behavior_from_flags,
+    target_change_flags_from_behavior,
 )
 from homeassistant import config_entries
 from homeassistant.core import HomeAssistant
@@ -76,10 +78,10 @@ def test_target_change_behavior_legacy_mapping(
 ) -> None:
     """Test mapping between the UI behavior and legacy settings."""
     assert (
-        _target_change_behavior_from_flags(disable_auto_switch, preserve_virtual_target)
+        target_change_behavior_from_flags(disable_auto_switch, preserve_virtual_target)
         == behavior
     )
-    assert _target_change_flags_from_behavior(behavior) == mapped_flags
+    assert target_change_flags_from_behavior(behavior) == mapped_flags
 
 
 @pytest.mark.asyncio

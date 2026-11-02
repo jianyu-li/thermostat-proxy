@@ -1,12 +1,12 @@
 """Tests for the disable_auto_switch configuration."""
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
+
 import pytest
 
-from homeassistant.core import HomeAssistant, State
-from homeassistant.components.climate import HVACMode, ClimateEntityFeature
-
 from custom_components.thermostat_proxy.climate import CustomThermostatEntity
+from homeassistant.components.climate import ClimateEntityFeature, HVACMode
+from homeassistant.core import State
 
 
 def create_proxy(
@@ -45,7 +45,7 @@ def create_proxy(
             "target_temp_high": 24.0,
             "target_temp_step": 1.0,
             "supported_features": supported,
-        }
+        },
     )
     proxy._real_state = hass.states.get("climate.real")
     proxy._update_real_temperature_limits()
@@ -159,7 +159,7 @@ async def test_disable_auto_switch_logbook_math(hass):
 
     hass.services.async_call.assert_called_once()
     call_args = hass.services.async_call.call_args[0]
-    domain, service, data = call_args
+    domain, _service, data = call_args
     assert domain == "logbook"
     assert (
         "26.0°C - 1.0°C = 25.0°C" in data["message"]
