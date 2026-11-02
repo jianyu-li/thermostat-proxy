@@ -1873,14 +1873,18 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         )
 
         previous_state = (
-            self._last_real_target_temp_low,
-            self._last_real_target_temp_high,
-            self._last_real_write_time,
+            self._last_commanded_real_target,
+            self._last_snapped_real_target,
             self._last_commanded_real_target_low,
             self._last_snapped_real_target_low,
             self._last_commanded_real_target_high,
             self._last_snapped_real_target_high,
+            self._last_real_target_temp_low,
+            self._last_real_target_temp_high,
+            self._last_real_write_time,
         )
+
+        self._reset_commanded_targets()
 
         if ATTR_TARGET_TEMP_HIGH in payload:
             self._record_real_target_request(payload[ATTR_TARGET_TEMP_HIGH])
@@ -1904,13 +1908,15 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             )
         except Exception:
             (
-                self._last_real_target_temp_low,
-                self._last_real_target_temp_high,
-                self._last_real_write_time,
+                self._last_commanded_real_target,
+                self._last_snapped_real_target,
                 self._last_commanded_real_target_low,
                 self._last_snapped_real_target_low,
                 self._last_commanded_real_target_high,
                 self._last_snapped_real_target_high,
+                self._last_real_target_temp_low,
+                self._last_real_target_temp_high,
+                self._last_real_write_time,
             ) = previous_state
             if ATTR_TARGET_TEMP_HIGH in payload:
                 self._remove_real_target_request(payload[ATTR_TARGET_TEMP_HIGH])
@@ -1928,7 +1934,6 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         async with self._command_lock:
             # Reset overdrive state on manual temperature change
             self._reset_overdrive_state()
-            self._reset_commanded_targets()
 
             # Handle dual setpoints for range-based modes (Auto/Heat-Cool)
             high = kwargs.get(ATTR_TARGET_TEMP_HIGH)
@@ -2024,7 +2029,13 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     self._last_real_write_time,
                     self._last_commanded_real_target,
                     self._last_snapped_real_target,
+                    self._last_commanded_real_target_low,
+                    self._last_snapped_real_target_low,
+                    self._last_commanded_real_target_high,
+                    self._last_snapped_real_target_high,
                 )
+
+                self._reset_commanded_targets()
 
                 self._last_commanded_real_target = real_target
                 self._last_snapped_real_target = None
@@ -2044,6 +2055,10 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     self._last_real_write_time,
                     self._last_commanded_real_target,
                     self._last_snapped_real_target,
+                    self._last_commanded_real_target_low,
+                    self._last_snapped_real_target_low,
+                    self._last_commanded_real_target_high,
+                    self._last_snapped_real_target_high,
                 ) = previous_state
                 self._remove_real_target_request(real_target)
                 raise

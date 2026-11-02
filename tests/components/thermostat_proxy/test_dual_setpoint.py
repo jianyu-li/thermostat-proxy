@@ -233,6 +233,10 @@ async def test_dual_setpoint_set_temperature_rollback_on_error(
     # Establish initial baseline values
     proxy._virtual_target_temperature_low = 18.0
     proxy._virtual_target_temperature_high = 24.0
+    proxy._last_commanded_real_target_low = 20.0
+    proxy._last_commanded_real_target_high = 26.0
+    proxy._last_snapped_real_target_low = 20.0
+    proxy._last_snapped_real_target_high = 26.0
     proxy._recent_real_target_requests = [(18.0, 100.0), (24.0, 100.0)]
     initial_recent_requests = list(proxy._recent_real_target_requests)
 
@@ -253,8 +257,10 @@ async def test_dual_setpoint_set_temperature_rollback_on_error(
     assert proxy._virtual_target_temperature_high == 24.0
 
     # Verify commanded targets and recent requests are rolled back
-    assert proxy._last_commanded_real_target_low is None
-    assert proxy._last_commanded_real_target_high is None
+    assert proxy._last_commanded_real_target_low == 20.0
+    assert proxy._last_commanded_real_target_high == 26.0
+    assert proxy._last_snapped_real_target_low == 20.0
+    assert proxy._last_snapped_real_target_high == 26.0
     assert proxy._recent_real_target_requests == initial_recent_requests
 
 
