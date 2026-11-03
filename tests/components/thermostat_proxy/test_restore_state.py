@@ -1,15 +1,12 @@
 """Tests for the Thermostat Proxy state restoration."""
 
 from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
-from homeassistant.core import HomeAssistant, State
-from homeassistant.components.climate import HVACMode, ClimateEntityFeature
-
 from custom_components.thermostat_proxy.climate import CustomThermostatEntity
-
-
-
+from homeassistant.components.climate import ClimateEntityFeature, HVACMode
+from homeassistant.core import State
 
 
 def create_proxy(hass, thermostat="climate.real", hvac_mode=HVACMode.HEAT):

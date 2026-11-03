@@ -8,7 +8,6 @@ import voluptuous as vol
 
 from custom_components.thermostat_proxy.climate import (
     PLATFORM_SCHEMA,
-    _extract_entity_config,
     async_setup_platform,
 )
 from custom_components.thermostat_proxy.const import (
@@ -405,8 +404,8 @@ def test_platform_schema_invalid_options() -> None:
 
 
 def test_extract_entity_config_helper() -> None:
-    """Test _extract_entity_config helper logic directly."""
-    cfg = _extract_entity_config({})
+    """Test extract_entity_config helper logic directly."""
+    cfg = extract_entity_config({})
     assert cfg["max_sync_offset"] == DEFAULT_MAX_SYNC_OFFSET
     assert cfg["disable_auto_switch"] is False
     assert cfg["preserve_virtual_target"] is False
@@ -414,13 +413,11 @@ def test_extract_entity_config_helper() -> None:
     assert cfg["physical_sensor_name"] == "Physical Entity"
 
     # Test custom physical sensor name
-    cfg_custom = _extract_entity_config(
-        {CONF_PHYSICAL_SENSOR_NAME: "Custom Thermostat"}
-    )
+    cfg_custom = extract_entity_config({CONF_PHYSICAL_SENSOR_NAME: "Custom Thermostat"})
     assert cfg_custom["physical_sensor_name"] == "Custom Thermostat"
 
     # Test invalid default sensor when valid_sensor_names provided
-    cfg_invalid = _extract_entity_config(
+    cfg_invalid = extract_entity_config(
         {CONF_DEFAULT_SENSOR: "MissingSensor"},
         valid_sensor_names=["Remote", "Physical Entity"],
         entry_id="test_entry_123",
@@ -428,7 +425,7 @@ def test_extract_entity_config_helper() -> None:
     assert cfg_invalid["default_sensor"] is None
 
     # Test valid default sensor
-    cfg_valid = _extract_entity_config(
+    cfg_valid = extract_entity_config(
         {CONF_DEFAULT_SENSOR: "Remote"},
         valid_sensor_names=["Remote", "Physical Entity"],
         entry_id="test_entry_123",

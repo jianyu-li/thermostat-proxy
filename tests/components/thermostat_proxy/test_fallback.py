@@ -1,16 +1,11 @@
 """Tests for the Thermostat Proxy fallback behavior."""
 
-from unittest.mock import AsyncMock, MagicMock
 import pytest
 
-from homeassistant.core import HomeAssistant, State, CoreState
-from homeassistant.components.climate import HVACMode, ClimateEntityFeature
-from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
-
 from custom_components.thermostat_proxy.climate import CustomThermostatEntity
-
-
-
+from homeassistant.components.climate import ClimateEntityFeature, HVACMode
+from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
+from homeassistant.core import State
 
 
 def create_proxy(hass, thermostat="climate.real", hvac_mode=HVACMode.HEAT):

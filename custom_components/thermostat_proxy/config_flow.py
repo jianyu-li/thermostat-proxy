@@ -48,6 +48,7 @@ from .const import (
     MAX_COOLDOWN_PERIOD_SECONDS,
     MAX_HUMIDITY_OVERCOOL,
     MAX_MIN_DUAL_TEMP_SPREAD,
+    MAX_OVERDRIVE_OFFSET,
     MAX_SAFETY_TEMP,
     MAX_SENSOR_CHANGE_THRESHOLD,
     MAX_TARGET_HUMIDITY,
@@ -80,9 +81,6 @@ ACTION_LABELS = {
     ACTION_FINISH: "Continue",
 }
 
-_target_change_behavior_from_flags = target_change_behavior_from_flags
-_target_change_flags_from_behavior = target_change_flags_from_behavior
-
 
 def _target_change_behavior_selector() -> selector.SelectSelector:
     """Build the physical target change behavior selector."""
@@ -109,7 +107,10 @@ def _get_overdrive_offset_selector() -> selector.NumberSelector:
     """Build the overdrive offset number selector."""
     return selector.NumberSelector(
         selector.NumberSelectorConfig(
-            min=0.0, max=5.0, step=0.5, mode=selector.NumberSelectorMode.BOX
+            min=0.0,
+            max=MAX_OVERDRIVE_OFFSET,
+            step=0.5,
+            mode=selector.NumberSelectorMode.BOX,
         )
     )
 
@@ -176,6 +177,31 @@ def _extract_entry_runtime_settings(
 ) -> dict[str, Any]:
     """Extract runtime settings from a config entry, merging options over data."""
     return extract_runtime_settings({**entry.data, **entry.options})
+
+
+def _sync_reconfigure_options(
+    entry: config_entries.ConfigEntry, data: dict[str, Any]
+) -> dict[str, Any]:
+    """Sync shared reconfigure parameters into entry options to prevent stale options overriding."""
+    options = dict(entry.options)
+    for key in (
+        CONF_DEFAULT_SENSOR,
+        CONF_COOLDOWN_PERIOD,
+        CONF_MIN_TEMP,
+        CONF_MAX_TEMP,
+        CONF_MAX_SYNC_OFFSET,
+        CONF_DISABLE_AUTO_SWITCH,
+        CONF_PRESERVE_VIRTUAL_TARGET,
+        CONF_SENSOR_CHANGE_THRESHOLD,
+        CONF_USE_LAST_ACTIVE_SENSOR,
+        CONF_MAX_HUMIDITY_OVERCOOL,
+        CONF_DEFAULT_TARGET_HUMIDITY,
+        CONF_MIN_DUAL_TEMP_SPREAD,
+        CONF_OVERDRIVE_OFFSET,
+    ):
+        if key in options:
+            options[key] = data.get(key)
+    return options
 
 
 def _value_or_default(data: dict[str, Any], key: str, default: Any) -> Any:
@@ -900,27 +926,9 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     }
 
                     if self._reconfigure_entry:
-                        options = dict(self._reconfigure_entry.options)
-                        # Sync shared parameters to ensure reconfigured values
-                        # are not overridden by stale options
-                        for key in (
-                            CONF_DEFAULT_SENSOR,
-                            CONF_COOLDOWN_PERIOD,
-                            CONF_MIN_TEMP,
-                            CONF_MAX_TEMP,
-                            CONF_MAX_SYNC_OFFSET,
-                            CONF_DISABLE_AUTO_SWITCH,
-                            CONF_PRESERVE_VIRTUAL_TARGET,
-                            CONF_SENSOR_CHANGE_THRESHOLD,
-                            CONF_USE_LAST_ACTIVE_SENSOR,
-                            CONF_MAX_HUMIDITY_OVERCOOL,
-                            CONF_DEFAULT_TARGET_HUMIDITY,
-                            CONF_MIN_DUAL_TEMP_SPREAD,
-                            CONF_OVERDRIVE_OFFSET,
-                        ):
-                            if key in options:
-                                options[key] = data.get(key)
-
+                        options = _sync_reconfigure_options(
+                            self._reconfigure_entry, data
+                        )
                         if data.get(CONF_NAME) != self._reconfigure_entry.title:
                             self.hass.config_entries.async_update_entry(
                                 self._reconfigure_entry, title=data[CONF_NAME]

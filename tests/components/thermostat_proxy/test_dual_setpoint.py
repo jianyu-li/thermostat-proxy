@@ -1,12 +1,13 @@
 """Tests for Thermostat Proxy dual setpoint mode (HEAT_COOL and AUTO)."""
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
+
 import pytest
 
-from homeassistant.core import HomeAssistant, State, CoreState
-from homeassistant.components.climate import HVACMode, ClimateEntityFeature, HVACAction
-
 from custom_components.thermostat_proxy.climate import CustomThermostatEntity
+from homeassistant.components.climate import ClimateEntityFeature, HVACAction, HVACMode
+from homeassistant.core import HomeAssistant, State
+from homeassistant.exceptions import HomeAssistantError
 
 
 def create_dual_proxy(hass, thermostat="climate.real", hvac_mode=HVACMode.HEAT_COOL):
@@ -80,7 +81,7 @@ async def test_dual_setpoint_set_temperature(hass, hvac_mode):
     await proxy.async_set_temperature(target_temp_low=19.0, target_temp_high=25.0)
 
     assert hass.services.async_call.called
-    args, kwargs = hass.services.async_call.call_args
+    args, _kwargs = hass.services.async_call.call_args
     assert args[0] == "climate"
     assert args[1] == "set_temperature"
     assert args[2]["target_temp_low"] == 21.0
@@ -116,7 +117,7 @@ async def test_dual_setpoint_realignment(hass):
     await proxy._async_realign_real_target_from_sensor()
 
     assert hass.services.async_call.called
-    args, kwargs = hass.services.async_call.call_args
+    args, _kwargs = hass.services.async_call.call_args
     assert args[0] == "climate"
     assert args[1] == "set_temperature"
     assert args[2]["target_temp_low"] == 22.0
@@ -150,7 +151,7 @@ async def test_dual_setpoint_overdrive_heat(hass):
     await proxy._async_realign_real_target_from_sensor()
 
     assert hass.services.async_call.called
-    args, kwargs = hass.services.async_call.call_args
+    args, _kwargs = hass.services.async_call.call_args
     assert args[0] == "climate"
     assert args[1] == "set_temperature"
     assert args[2]["target_temp_low"] == 23.0
@@ -182,7 +183,7 @@ async def test_dual_setpoint_overdrive_cool(hass):
     await proxy._async_realign_real_target_from_sensor()
 
     assert hass.services.async_call.called
-    args, kwargs = hass.services.async_call.call_args
+    args, _kwargs = hass.services.async_call.call_args
     assert args[0] == "climate"
     assert args[1] == "set_temperature"
     assert args[2]["target_temp_high"] == 17.0
@@ -197,7 +198,7 @@ async def test_dual_setpoint_partial_set_temperature(hass):
     await proxy.async_set_temperature(target_temp_low=19.0)
 
     assert hass.services.async_call.called
-    args, kwargs = hass.services.async_call.call_args
+    args, _kwargs = hass.services.async_call.call_args
     assert args[0] == "climate"
     assert args[1] == "set_temperature"
     assert args[2]["target_temp_low"] == 21.0
@@ -220,6 +221,47 @@ async def test_dual_setpoint_service_error_handling(hass):
 
     # Should handle error gracefully without raising
     await proxy._async_realign_real_target_from_sensor()
+
+
+@pytest.mark.asyncio
+async def test_dual_setpoint_set_temperature_rollback_on_error(
+    hass: HomeAssistant,
+) -> None:
+    """Test that dual setpoint async_set_temperature rolls back state on service error."""
+    proxy = create_dual_proxy(hass)
+
+    # Establish initial baseline values
+    proxy._virtual_target_temperature_low = 18.0
+    proxy._virtual_target_temperature_high = 24.0
+    proxy._last_commanded_real_target_low = 20.0
+    proxy._last_commanded_real_target_high = 26.0
+    proxy._last_snapped_real_target_low = 20.0
+    proxy._last_snapped_real_target_high = 26.0
+    proxy._recent_real_target_requests = [(18.0, 100.0), (24.0, 100.0)]
+    initial_recent_requests = list(proxy._recent_real_target_requests)
+
+    async def side_effect(domain, service, service_data, **kwargs):
+        if domain == "climate" and service == "set_temperature":
+            raise HomeAssistantError("Service call failed")
+
+    hass.services.async_call.side_effect = side_effect
+
+    with pytest.raises(HomeAssistantError):
+        await proxy.async_set_temperature(
+            target_temp_low=19.0,
+            target_temp_high=25.0,
+        )
+
+    # Verify virtual targets remain unchanged (not updated to 19.0/25.0)
+    assert proxy._virtual_target_temperature_low == 18.0
+    assert proxy._virtual_target_temperature_high == 24.0
+
+    # Verify commanded targets and recent requests are rolled back
+    assert proxy._last_commanded_real_target_low == 20.0
+    assert proxy._last_commanded_real_target_high == 26.0
+    assert proxy._last_snapped_real_target_low == 20.0
+    assert proxy._last_snapped_real_target_high == 26.0
+    assert proxy._recent_real_target_requests == initial_recent_requests
 
 
 @pytest.mark.asyncio
@@ -259,7 +301,7 @@ async def test_dual_setpoint_overdrive_heat_deadband_enforcement_fahrenheit(hass
     await proxy._async_realign_real_target_from_sensor()
 
     assert hass.services.async_call.called
-    args, kwargs = hass.services.async_call.call_args
+    args, _kwargs = hass.services.async_call.call_args
     assert args[0] == "climate"
     assert args[1] == "set_temperature"
     assert args[2]["target_temp_low"] == 65.5
@@ -305,7 +347,7 @@ async def test_dual_setpoint_overdrive_cool_deadband_enforcement_fahrenheit(hass
     await proxy._async_realign_real_target_from_sensor()
 
     assert hass.services.async_call.called
-    args, kwargs = hass.services.async_call.call_args
+    args, _kwargs = hass.services.async_call.call_args
     assert args[0] == "climate"
     assert args[1] == "set_temperature"
     assert args[2]["target_temp_high"] == 68.0
@@ -339,7 +381,7 @@ async def test_dual_setpoint_set_temperature_deadband_enforcement(hass):
     await proxy.async_set_temperature(target_temp_low=68.0, target_temp_high=70.0)
 
     assert hass.services.async_call.called
-    args, kwargs = hass.services.async_call.call_args
+    args, _kwargs = hass.services.async_call.call_args
     assert args[0] == "climate"
     assert args[1] == "set_temperature"
     assert (args[2]["target_temp_high"] - args[2]["target_temp_low"]) >= 5.0
@@ -410,7 +452,7 @@ async def test_dual_setpoint_satisfied_cooling_prevents_rounding_crossover(hass)
 
     # The high target sent to physical thermostat should be 72.0, NOT 71.0
     assert hass.services.async_call.called
-    args, kwargs = hass.services.async_call.call_args
+    args, _kwargs = hass.services.async_call.call_args
     assert args[0] == "climate"
     assert args[1] == "set_temperature"
     assert args[2]["target_temp_high"] == 72.0
@@ -451,7 +493,7 @@ async def test_dual_setpoint_satisfied_heating_prevents_rounding_crossover(hass)
     await proxy._async_realign_real_target_from_sensor()
 
     assert hass.services.async_call.called
-    args, kwargs = hass.services.async_call.call_args
+    args, _kwargs = hass.services.async_call.call_args
     assert args[0] == "climate"
     assert args[1] == "set_temperature"
     assert args[2]["target_temp_low"] == 67.0

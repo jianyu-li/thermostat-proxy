@@ -1,15 +1,12 @@
 """Tests for the Thermostat Proxy mode and overdrive logic."""
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
+
 import pytest
 
-from homeassistant.core import HomeAssistant, State, CoreState
-from homeassistant.components.climate import HVACMode, ClimateEntityFeature
-
 from custom_components.thermostat_proxy.climate import CustomThermostatEntity
-
-
-
+from homeassistant.components.climate import ClimateEntityFeature, HVACMode
+from homeassistant.core import State
 
 
 def create_proxy(hass, thermostat="climate.real"):
@@ -70,7 +67,7 @@ async def test_overdrive_heat(hass):
 
     # Verify service call
     assert hass.services.async_call.called
-    args, kwargs = hass.services.async_call.call_args
+    args, _kwargs = hass.services.async_call.call_args
     assert args[0] == "climate"
     assert args[1] == "set_temperature"
     assert args[2]["temperature"] == 27.0
@@ -101,7 +98,7 @@ async def test_overdrive_cool(hass):
     await proxy._async_realign_real_target_from_sensor()
 
     assert hass.services.async_call.called
-    args, kwargs = hass.services.async_call.call_args
+    args, _kwargs = hass.services.async_call.call_args
     assert args[0] == "climate"
     assert args[1] == "set_temperature"
     assert args[2]["temperature"] == 17.0
@@ -144,7 +141,7 @@ async def test_cool_mode_target_temperature_on_range_capable_thermostat(hass):
     await proxy.async_set_temperature(temperature=21.0)
 
     assert hass.services.async_call.called
-    args, kwargs = hass.services.async_call.call_args
+    args, _kwargs = hass.services.async_call.call_args
     assert args[0] == "climate"
     assert args[1] == "set_temperature"
     assert args[2]["temperature"] == 25.0  # Real target = 24.0 + (21.0 - 20.0) = 25.0
