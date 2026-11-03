@@ -1,18 +1,20 @@
 """Tests for the disable_auto_switch configuration."""
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
+
 import pytest
 
-from homeassistant.core import HomeAssistant, State
-from homeassistant.components.climate import HVACMode, ClimateEntityFeature
-
 from custom_components.thermostat_proxy.climate import CustomThermostatEntity
+from homeassistant.components.climate import ClimateEntityFeature, HVACMode
+from homeassistant.core import State
 
 
-
-
-
-def create_proxy(hass, disable_auto_switch=False, hvac_mode=HVACMode.HEAT):
+def create_proxy(
+    hass,
+    disable_auto_switch=False,
+    preserve_virtual_target=False,
+    hvac_mode=HVACMode.HEAT,
+):
     """Helper to create a configured CustomThermostatEntity."""
     proxy = CustomThermostatEntity(
         hass=hass,
@@ -24,6 +26,7 @@ def create_proxy(hass, disable_auto_switch=False, hvac_mode=HVACMode.HEAT):
         physical_sensor_name="Physical",
         use_last_active_sensor=False,
         disable_auto_switch=disable_auto_switch,
+        preserve_virtual_target=preserve_virtual_target,
     )
 
     supported = (
@@ -42,7 +45,7 @@ def create_proxy(hass, disable_auto_switch=False, hvac_mode=HVACMode.HEAT):
             "target_temp_high": 24.0,
             "target_temp_step": 1.0,
             "supported_features": supported,
-        }
+        },
     )
     proxy._real_state = hass.states.get("climate.real")
     proxy._update_real_temperature_limits()
@@ -111,6 +114,39 @@ async def test_external_change_updates_last_real_write_time(hass):
 
 
 @pytest.mark.asyncio
+async def test_preserve_virtual_target_ignores_external_change(hass):
+    """Test that the opt-in setting keeps the virtual target unchanged."""
+    proxy = create_proxy(
+        hass,
+        disable_auto_switch=True,
+        preserve_virtual_target=True,
+        hvac_mode=HVACMode.COOL,
+    )
+
+    proxy._handle_external_real_target_change(21.0, 22.0)
+
+    assert proxy._selected_sensor_name == "Remote"
+    assert proxy._virtual_target_temperature == 26.0
+
+
+@pytest.mark.asyncio
+async def test_preserve_virtual_target_ignores_external_dual_change(hass):
+    """Test that the opt-in setting keeps dual virtual targets unchanged."""
+    proxy = create_proxy(
+        hass,
+        disable_auto_switch=True,
+        preserve_virtual_target=True,
+        hvac_mode=HVACMode.HEAT_COOL,
+    )
+
+    proxy._detect_external_dual_target_change(20.0, 25.0, was_not_controlling=False)
+
+    assert proxy._selected_sensor_name == "Remote"
+    assert proxy._virtual_target_temperature_low == 18.0
+    assert proxy._virtual_target_temperature_high == 24.0
+
+
+@pytest.mark.asyncio
 async def test_disable_auto_switch_logbook_math(hass):
     """Test logbook message formatting for external changes when disable_auto_switch is enabled."""
     proxy = create_proxy(hass, disable_auto_switch=True, hvac_mode=HVACMode.HEAT)
@@ -123,7 +159,7 @@ async def test_disable_auto_switch_logbook_math(hass):
 
     hass.services.async_call.assert_called_once()
     call_args = hass.services.async_call.call_args[0]
-    domain, service, data = call_args
+    domain, _service, data = call_args
     assert domain == "logbook"
     assert (
         "26.0°C - 1.0°C = 25.0°C" in data["message"]

@@ -18,6 +18,7 @@ from homeassistant.components.climate import PLATFORM_SCHEMA, ClimateEntity
 from homeassistant.components.climate.const import (
     ATTR_CURRENT_HUMIDITY,
     ATTR_CURRENT_TEMPERATURE,
+    ATTR_FAN_MODE,
     ATTR_HVAC_ACTION,
     ATTR_HVAC_MODE,
     ATTR_MAX_TEMP,
@@ -26,6 +27,7 @@ from homeassistant.components.climate.const import (
     ATTR_TARGET_TEMP_LOW,
     ATTR_TARGET_TEMP_STEP,
     DOMAIN as CLIMATE_DOMAIN,
+    SERVICE_SET_FAN_MODE,
     SERVICE_SET_HVAC_MODE,
     SERVICE_SET_TEMPERATURE,
     ClimateEntityFeature,
@@ -43,6 +45,8 @@ from homeassistant.const import (
     ATTR_ENTITY_ID,
     ATTR_TEMPERATURE,
     CONF_NAME,
+    PRECISION_TENTHS,
+    PRECISION_WHOLE,
     STATE_UNAVAILABLE,
     STATE_UNKNOWN,
     UnitOfTemperature,
@@ -72,8 +76,12 @@ from .const import (
     CONF_MAX_HUMIDITY_OVERCOOL,
     CONF_MAX_SYNC_OFFSET,
     CONF_MAX_TEMP,
+    CONF_MIN_DUAL_TEMP_SPREAD,
     CONF_MIN_TEMP,
+    CONF_OVERDRIVE_OFFSET,
     CONF_PHYSICAL_SENSOR_NAME,
+    CONF_PHYSICAL_TARGET_CHANGE_BEHAVIOR,
+    CONF_PRESERVE_VIRTUAL_TARGET,
     CONF_SENSOR_CHANGE_THRESHOLD,
     CONF_SENSOR_ENTITY_ID,
     CONF_SENSOR_HUMIDITY_ENTITY_ID,
@@ -86,19 +94,26 @@ from .const import (
     DEFAULT_DISABLE_AUTO_SWITCH,
     DEFAULT_HUMIDITY_DEADBAND,
     DEFAULT_MAX_HUMIDITY_OVERCOOL,
-    DEFAULT_MAX_SYNC_OFFSET,
+    DEFAULT_MIN_DUAL_TEMP_SPREAD_CELSIUS,
+    DEFAULT_MIN_DUAL_TEMP_SPREAD_FAHRENHEIT,
     DEFAULT_NAME,
+    DEFAULT_OVERDRIVE_OFFSET,
+    DEFAULT_PRESERVE_VIRTUAL_TARGET,
     DEFAULT_SENSOR_CHANGE_THRESHOLD,
-    DEFAULT_SENSOR_LAST_ACTIVE,
     DEFAULT_TARGET_HUMIDITY,
+    MAX_TARGET_HUMIDITY,
+    MIN_TARGET_HUMIDITY,
     OVERDRIVE_ADJUSTMENT_COOL,
-    OVERDRIVE_ADJUSTMENT_HEAT,
     PHYSICAL_SENSOR_NAME,
     PHYSICAL_SENSOR_SENTINEL,
-    SYNC_LOG_SUPPRESSION_PADDING_SEC,
+    SPREAD_TOLERANCE,
+    TARGET_CHANGE_BEHAVIOR_AUTO_SWITCH,
+    TARGET_CHANGE_BEHAVIOR_DISABLE_AUTO_SWITCH,
+    TARGET_CHANGE_BEHAVIOR_PRESERVE_VIRTUAL_TARGET,
     UNINITIALIZED_TEMP_CELSIUS,
     UNINITIALIZED_TEMP_FAHRENHEIT,
 )
+from .helpers import extract_entity_config
 
 # Defined locally because homeassistant.components.climate.const does not
 # export these constants in all supported HA versions.
@@ -148,6 +163,7 @@ _RESERVED_REAL_ATTRIBUTES = {
     "max_humidity",
     "min_temp",
     "max_temp",
+    "temperature_unit",
 }
 
 # Extensibility hook: add HVACMode values here to block remote sensors in those modes.
@@ -182,7 +198,30 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
             CONF_DISABLE_AUTO_SWITCH, default=DEFAULT_DISABLE_AUTO_SWITCH
         ): cv.boolean,
         vol.Optional(
+            CONF_PRESERVE_VIRTUAL_TARGET, default=DEFAULT_PRESERVE_VIRTUAL_TARGET
+        ): cv.boolean,
+        vol.Optional(CONF_PHYSICAL_TARGET_CHANGE_BEHAVIOR): vol.In(
+            [
+                TARGET_CHANGE_BEHAVIOR_AUTO_SWITCH,
+                TARGET_CHANGE_BEHAVIOR_DISABLE_AUTO_SWITCH,
+                TARGET_CHANGE_BEHAVIOR_PRESERVE_VIRTUAL_TARGET,
+            ]
+        ),
+        vol.Optional(
             CONF_SENSOR_CHANGE_THRESHOLD, default=DEFAULT_SENSOR_CHANGE_THRESHOLD
+        ): vol.Coerce(float),
+        vol.Optional(
+            CONF_MAX_HUMIDITY_OVERCOOL, default=DEFAULT_MAX_HUMIDITY_OVERCOOL
+        ): vol.Coerce(float),
+        vol.Optional(
+            CONF_DEFAULT_TARGET_HUMIDITY, default=DEFAULT_TARGET_HUMIDITY
+        ): vol.All(
+            vol.Coerce(int),
+            vol.Range(min=MIN_TARGET_HUMIDITY, max=MAX_TARGET_HUMIDITY),
+        ),
+        vol.Optional(CONF_MIN_DUAL_TEMP_SPREAD): vol.Coerce(float),
+        vol.Optional(
+            CONF_OVERDRIVE_OFFSET, default=DEFAULT_OVERDRIVE_OFFSET
         ): vol.Coerce(float),
     }
 )
@@ -195,44 +234,17 @@ async def async_setup_platform(
     discovery_info: DiscoveryInfoType | None = None,
 ) -> None:
     """Set up a Thermostat Proxy entity from YAML."""
-
-    default_sensor = config.get(CONF_DEFAULT_SENSOR)
-    use_last_active_sensor = config.get(CONF_USE_LAST_ACTIVE_SENSOR, False)
-    if default_sensor == DEFAULT_SENSOR_LAST_ACTIVE:
-        use_last_active_sensor = True
-        default_sensor = None
+    entity_config = extract_entity_config(config)
 
     async_add_entities(
         [
             CustomThermostatEntity(
                 hass=hass,
-                name=config[CONF_NAME],
+                name=config.get(CONF_NAME, DEFAULT_NAME),
                 real_thermostat=config[CONF_THERMOSTAT],
                 sensors=config[CONF_SENSORS],
-                default_sensor=default_sensor,
                 unique_id=config.get(CONF_UNIQUE_ID),
-                physical_sensor_name=config.get(
-                    CONF_PHYSICAL_SENSOR_NAME, PHYSICAL_SENSOR_NAME
-                ),
-                use_last_active_sensor=use_last_active_sensor,
-                cooldown_period=config.get(
-                    CONF_COOLDOWN_PERIOD, DEFAULT_COOLDOWN_PERIOD
-                ),
-                user_min_temp=config.get(CONF_MIN_TEMP),
-                user_max_temp=config.get(CONF_MAX_TEMP),
-                max_sync_offset=config.get(CONF_MAX_SYNC_OFFSET),
-                disable_auto_switch=config.get(
-                    CONF_DISABLE_AUTO_SWITCH, DEFAULT_DISABLE_AUTO_SWITCH
-                ),
-                sensor_change_threshold=config.get(
-                    CONF_SENSOR_CHANGE_THRESHOLD, DEFAULT_SENSOR_CHANGE_THRESHOLD
-                ),
-                max_humidity_overcool=config.get(
-                    CONF_MAX_HUMIDITY_OVERCOOL, DEFAULT_MAX_HUMIDITY_OVERCOOL
-                ),
-                default_target_humidity=config.get(
-                    CONF_DEFAULT_TARGET_HUMIDITY, DEFAULT_TARGET_HUMIDITY
-                ),
+                **entity_config,
             )
         ]
     )
@@ -244,7 +256,6 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up a Thermostat Proxy entity from a config entry."""
-
     data = entry.data
     sensors = data.get(CONF_SENSORS) or []
     if not sensors:
@@ -254,64 +265,18 @@ async def async_setup_entry(
         )
         return
 
-    raw_default_sensor = entry.options.get(CONF_DEFAULT_SENSOR) or data.get(
-        CONF_DEFAULT_SENSOR
-    )
-    physical_sensor_name = data.get(CONF_PHYSICAL_SENSOR_NAME, PHYSICAL_SENSOR_NAME)
+    config = {**entry.data, **entry.options}
+    physical_sensor_name = config.get(CONF_PHYSICAL_SENSOR_NAME, PHYSICAL_SENSOR_NAME)
     valid_sensor_names = [sensor[CONF_SENSOR_NAME] for sensor in sensors]
     if physical_sensor_name not in valid_sensor_names:
         valid_sensor_names.append(physical_sensor_name)
 
-    use_last_active_sensor = entry.options.get(
-        CONF_USE_LAST_ACTIVE_SENSOR,
-        data.get(CONF_USE_LAST_ACTIVE_SENSOR, False),
+    entity_config = extract_entity_config(
+        config,
+        valid_sensor_names=valid_sensor_names,
+        entry_id=entry.entry_id,
+        physical_sensor_name=physical_sensor_name,
     )
-    cooldown_period = entry.options.get(
-        CONF_COOLDOWN_PERIOD,
-        data.get(CONF_COOLDOWN_PERIOD, DEFAULT_COOLDOWN_PERIOD),
-    )
-    user_min_temp = entry.options.get(
-        CONF_MIN_TEMP,
-        data.get(CONF_MIN_TEMP),
-    )
-    user_max_temp = entry.options.get(
-        CONF_MAX_TEMP,
-        data.get(CONF_MAX_TEMP),
-    )
-    max_sync_offset = entry.options.get(
-        CONF_MAX_SYNC_OFFSET,
-        data.get(CONF_MAX_SYNC_OFFSET, DEFAULT_MAX_SYNC_OFFSET),
-    )
-    disable_auto_switch = entry.options.get(
-        CONF_DISABLE_AUTO_SWITCH,
-        data.get(CONF_DISABLE_AUTO_SWITCH, DEFAULT_DISABLE_AUTO_SWITCH),
-    )
-    sensor_change_threshold = entry.options.get(
-        CONF_SENSOR_CHANGE_THRESHOLD,
-        data.get(CONF_SENSOR_CHANGE_THRESHOLD, DEFAULT_SENSOR_CHANGE_THRESHOLD),
-    )
-    max_humidity_overcool = entry.options.get(
-        CONF_MAX_HUMIDITY_OVERCOOL,
-        data.get(CONF_MAX_HUMIDITY_OVERCOOL, DEFAULT_MAX_HUMIDITY_OVERCOOL),
-    )
-    default_target_humidity = entry.options.get(
-        CONF_DEFAULT_TARGET_HUMIDITY,
-        data.get(CONF_DEFAULT_TARGET_HUMIDITY, DEFAULT_TARGET_HUMIDITY),
-    )
-
-    if raw_default_sensor == DEFAULT_SENSOR_LAST_ACTIVE:
-        use_last_active_sensor = True
-        default_sensor = None
-    else:
-        default_sensor = raw_default_sensor
-
-    if default_sensor and default_sensor not in valid_sensor_names:
-        _LOGGER.warning(
-            "Default sensor '%s' not in config entry %s; falling back to first sensor",
-            default_sensor,
-            entry.entry_id,
-        )
-        default_sensor = None
 
     async_add_entities(
         [
@@ -320,18 +285,8 @@ async def async_setup_entry(
                 name=data.get(CONF_NAME, DEFAULT_NAME),
                 real_thermostat=data[CONF_THERMOSTAT],
                 sensors=sensors,
-                default_sensor=default_sensor,
                 unique_id=data.get(CONF_UNIQUE_ID) or entry.entry_id,
-                physical_sensor_name=physical_sensor_name,
-                use_last_active_sensor=use_last_active_sensor,
-                cooldown_period=cooldown_period,
-                user_min_temp=user_min_temp,
-                user_max_temp=user_max_temp,
-                max_sync_offset=max_sync_offset,
-                disable_auto_switch=disable_auto_switch,
-                sensor_change_threshold=sensor_change_threshold,
-                max_humidity_overcool=max_humidity_overcool,
-                default_target_humidity=default_target_humidity,
+                **entity_config,
             )
         ]
     )
@@ -368,9 +323,12 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         user_max_temp: float | None = None,
         max_sync_offset: float | None = None,
         disable_auto_switch: bool = False,
+        preserve_virtual_target: bool = DEFAULT_PRESERVE_VIRTUAL_TARGET,
         sensor_change_threshold: float = DEFAULT_SENSOR_CHANGE_THRESHOLD,
         max_humidity_overcool: float = DEFAULT_MAX_HUMIDITY_OVERCOOL,
         default_target_humidity: int = DEFAULT_TARGET_HUMIDITY,
+        min_dual_temp_spread: float | None = None,
+        overdrive_offset: float = DEFAULT_OVERDRIVE_OFFSET,
     ) -> None:
         self.hass = hass
         if isinstance(cooldown_period, (int, float)):
@@ -431,6 +389,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self._user_max_temp: float | None = user_max_temp
         self._max_sync_offset: float | None = max_sync_offset
         self._disable_auto_switch: bool = disable_auto_switch
+        self._preserve_virtual_target: bool = preserve_virtual_target
         self._sensor_change_threshold: float = float(sensor_change_threshold)
         self._max_humidity_overcool: float = float(max_humidity_overcool)
         self._default_target_humidity: int = int(default_target_humidity)
@@ -443,12 +402,25 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self._entity_health: dict[str, bool] = {}
         self._command_lock = asyncio.Lock()
         self._sensor_realign_task: asyncio.Task | None = None
-        self._suppress_sync_logs_until: float | None = None
         self._realign_trigger_source: str | None = None
         self._cooldown_timer_unsub: Callable[[], None] | None = None
         self._sensor_precisions: dict[str, float] = {}
         self._active_overdrive_heat: bool = False
         self._active_overdrive_cool: bool = False
+        self._min_dual_temp_spread: float | None = (
+            float(min_dual_temp_spread) if min_dual_temp_spread is not None else None
+        )
+        self._overdrive_offset: float = (
+            float(overdrive_offset)
+            if overdrive_offset is not None
+            else DEFAULT_OVERDRIVE_OFFSET
+        )
+        self._last_commanded_real_target: float | None = None
+        self._last_snapped_real_target: float | None = None
+        self._last_commanded_real_target_low: float | None = None
+        self._last_commanded_real_target_high: float | None = None
+        self._last_snapped_real_target_low: float | None = None
+        self._last_snapped_real_target_high: float | None = None
 
     def _log_debug(self, msg: str, *args: Any) -> None:
         """Log diagnostic information."""
@@ -563,6 +535,12 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             unsubscribe = self._unsub_listeners.pop()
             unsubscribe()
 
+    @callback
+    def async_entity_id_changed(self, old_entity_id: str) -> None:
+        """Handle entity_id change in place."""
+        if hasattr(super(), "async_entity_id_changed"):
+            super().async_entity_id_changed(old_entity_id)
+
     def _enforce_hvac_mode_restrictions(self, hvac_mode_str: str | None = None) -> None:
         """Ensure proxy is restricted to the physical sensor if in an unsupported mode."""
         if not hvac_mode_str and self._real_state:
@@ -602,6 +580,51 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
             self.hass.async_create_task(_log_fallback())
 
+    def _sync_virtual_targets_on_mode_transition(
+        self, old_mode_str: str, new_mode_str: str
+    ) -> None:
+        """Handle mode transition target sync between dual and single setpoint modes."""
+        if old_mode_str in (HVACMode.HEAT_COOL, HVACMode.AUTO) and new_mode_str in (
+            HVACMode.COOL,
+            HVACMode.HEAT,
+        ):
+            if new_mode_str == HVACMode.COOL:
+                if self._virtual_target_temperature_high is not None:
+                    self._virtual_target_temperature = (
+                        self._virtual_target_temperature_high
+                    )
+                else:
+                    rt = self._get_real_target_temperature()
+                    if rt is not None:
+                        self._virtual_target_temperature = (
+                            self._apply_target_constraints(rt)
+                        )
+            elif new_mode_str == HVACMode.HEAT:
+                if self._virtual_target_temperature_low is not None:
+                    self._virtual_target_temperature = (
+                        self._virtual_target_temperature_low
+                    )
+                else:
+                    rt = self._get_real_target_temperature()
+                    if rt is not None:
+                        self._virtual_target_temperature = (
+                            self._apply_target_constraints(rt)
+                        )
+        elif old_mode_str in (HVACMode.COOL, HVACMode.HEAT) and new_mode_str in (
+            HVACMode.HEAT_COOL,
+            HVACMode.AUTO,
+        ):
+            if (
+                old_mode_str == HVACMode.COOL
+                and self._virtual_target_temperature is not None
+            ):
+                self._virtual_target_temperature_high = self._virtual_target_temperature
+            elif (
+                old_mode_str == HVACMode.HEAT
+                and self._virtual_target_temperature is not None
+            ):
+                self._virtual_target_temperature_low = self._virtual_target_temperature
+
     @callback
     def _async_handle_real_state_event(self, event) -> None:
         """Handle updates to the linked thermostat."""
@@ -624,55 +647,15 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self._enforce_hvac_mode_restrictions(new_state.state)
 
         mode_changed = old_state is not None and old_state.state != new_state.state
+        if mode_changed:
+            self._reset_overdrive_state()
+            self._reset_commanded_targets()
 
         # Handle mode transition target sync between dual and single setpoint modes
         if mode_changed and old_state is not None:
-            old_mode_str = old_state.state
-            new_mode_str = new_state.state
-            if old_mode_str in (HVACMode.HEAT_COOL, HVACMode.AUTO) and new_mode_str in (
-                HVACMode.COOL,
-                HVACMode.HEAT,
-            ):
-                if new_mode_str == HVACMode.COOL:
-                    if self._virtual_target_temperature_high is not None:
-                        self._virtual_target_temperature = (
-                            self._virtual_target_temperature_high
-                        )
-                    else:
-                        rt = self._get_real_target_temperature()
-                        if rt is not None:
-                            self._virtual_target_temperature = (
-                                self._apply_target_constraints(rt)
-                            )
-                elif new_mode_str == HVACMode.HEAT:
-                    if self._virtual_target_temperature_low is not None:
-                        self._virtual_target_temperature = (
-                            self._virtual_target_temperature_low
-                        )
-                    else:
-                        rt = self._get_real_target_temperature()
-                        if rt is not None:
-                            self._virtual_target_temperature = (
-                                self._apply_target_constraints(rt)
-                            )
-            elif old_mode_str in (HVACMode.COOL, HVACMode.HEAT) and new_mode_str in (
-                HVACMode.HEAT_COOL,
-                HVACMode.AUTO,
-            ):
-                if (
-                    old_mode_str == HVACMode.COOL
-                    and self._virtual_target_temperature is not None
-                ):
-                    self._virtual_target_temperature_high = (
-                        self._virtual_target_temperature
-                    )
-                elif (
-                    old_mode_str == HVACMode.HEAT
-                    and self._virtual_target_temperature is not None
-                ):
-                    self._virtual_target_temperature_low = (
-                        self._virtual_target_temperature
-                    )
+            self._sync_virtual_targets_on_mode_transition(
+                old_state.state, new_state.state
+            )
 
         # Targets may arrive after the mode changes, or on first appearance.
         if self.is_range_mode:
@@ -689,22 +672,34 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         )
         skip_external_change = was_not_controlling or mode_changed
 
+        old_real_target = (
+            _coerce_temperature(old_state.attributes.get(ATTR_TEMPERATURE))
+            if old_state
+            else None
+        )
+
         if real_target is not None:
             previous_real_target = self._last_real_target_temp
             self._last_real_target_temp = real_target
             strict_tolerance = self._pending_request_tolerance()
 
             # 75% of step size accounts for rounding drift without swallowing real changes
+            step_size = self.target_temperature_step or 0
             loose_tolerance = max(
                 PENDING_REQUEST_TOLERANCE_MAX,
-                (self._target_temp_step or 0) * 0.75,
+                step_size * 0.75,
             )
+            abs_tol = (step_size * 0.5) if step_size else EXTERNAL_CHANGE_TOLERANCE
+
             # Two-tiered matching: strict consumes, loose suppresses.
             if self._consume_real_target_request(real_target, strict_tolerance):
+                self._last_snapped_real_target = real_target
                 self._log_debug(
                     "Real target %s matched pending request (strict)", real_target
                 )
             elif self._has_pending_real_target_request(real_target, loose_tolerance):
+                self._consume_real_target_request(real_target, loose_tolerance)
+                self._last_snapped_real_target = real_target
                 self._log_debug(
                     "Real target %s matched pending request (loose) - ignoring potential external change",
                     real_target,
@@ -720,6 +715,12 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                         real_target,
                     )
                 elif is_recent_write:
+                    if self._last_commanded_real_target is not None and math.isclose(
+                        real_target,
+                        self._last_commanded_real_target,
+                        abs_tol=loose_tolerance,
+                    ):
+                        self._last_snapped_real_target = real_target
                     self._log_debug(
                         "Real target %s changed during post-write grace period (%.1fs < %.1fs) - ignoring potential echo",
                         real_target,
@@ -727,25 +728,36 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                         POST_WRITE_GRACE_PERIOD,
                     )
                 else:
-                    abs_tol = (
-                        (self._target_temp_step * 0.5)
-                        if self._target_temp_step
-                        else EXTERNAL_CHANGE_TOLERANCE
-                    )
                     if not math.isclose(
                         real_target,
                         previous_real_target,
                         abs_tol=abs_tol,
                     ):
-                        _LOGGER.info(
-                            "Detected potential external change: %s -> %s (tolerance %s)",
-                            previous_real_target,
-                            real_target,
-                            abs_tol,
-                        )
-                        self._handle_external_real_target_change(
-                            real_target, previous_real_target
-                        )
+                        if self._is_snapped_target_readback(
+                            real_val=real_target,
+                            commanded_val=self._last_commanded_real_target,
+                            snapped_val=self._last_snapped_real_target,
+                            previous_val=previous_real_target,
+                            old_val=old_real_target,
+                            loose_tolerance=loose_tolerance,
+                            abs_tol=abs_tol,
+                        ):
+                            self._last_snapped_real_target = real_target
+                            self._log_debug(
+                                "Real target %s matches snapped/commanded target %s - ignoring as read-back",
+                                real_target,
+                                self._last_commanded_real_target,
+                            )
+                        else:
+                            _LOGGER.info(
+                                "Detected potential external change: %s -> %s (tolerance %s)",
+                                previous_real_target,
+                                real_target,
+                                abs_tol,
+                            )
+                            self._handle_external_real_target_change(
+                                real_target, previous_real_target
+                            )
             else:
                 self._log_debug("Initial real target captured: %s", real_target)
 
@@ -780,6 +792,63 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         if self._is_active_sensor_entity(entity_id):
             self._schedule_target_realign(trigger_source="sensor")
         self.async_write_ha_state()
+
+    def _is_physical_sensor_preset_selected(self) -> bool:
+        """Return True if the physical thermostat preset is currently selected."""
+        sensor = self._sensor_lookup.get(self._selected_sensor_name)
+        return not sensor or sensor.is_physical
+
+    def _is_remote_sensor_controlling(self) -> bool:
+        """Return True if a healthy remote sensor preset is actively controlling."""
+        return self.preset_mode != self._physical_sensor_name
+
+    def _reset_overdrive_state(self) -> None:
+        """Reset all active overdrive flags."""
+        self._active_overdrive_heat = False
+        self._active_overdrive_cool = False
+        self._active_overdrive_humidity = False
+
+    def _reset_commanded_targets(
+        self, *, single: bool = True, dual: bool = True
+    ) -> None:
+        """Reset tracked commanded and snapped real thermostat targets."""
+        if single:
+            self._last_commanded_real_target = None
+            self._last_snapped_real_target = None
+        if dual:
+            self._last_commanded_real_target_low = None
+            self._last_commanded_real_target_high = None
+            self._last_snapped_real_target_low = None
+            self._last_snapped_real_target_high = None
+
+    @staticmethod
+    def _is_snapped_target_readback(
+        real_val: float,
+        commanded_val: float | None,
+        snapped_val: float | None,
+        previous_val: float | None,
+        old_val: float | None,
+        loose_tolerance: float,
+        abs_tol: float,
+    ) -> bool:
+        """Return True if real_val is a hardware-snapped read-back of commanded_val."""
+        if commanded_val is None or not math.isclose(
+            real_val, commanded_val, abs_tol=loose_tolerance
+        ):
+            return False
+        return (
+            (
+                snapped_val is not None
+                and math.isclose(real_val, snapped_val, abs_tol=abs_tol)
+            )
+            or (
+                old_val is not None and math.isclose(real_val, old_val, abs_tol=abs_tol)
+            )
+            or (
+                previous_val is not None
+                and math.isclose(previous_val, commanded_val, abs_tol=abs_tol)
+            )
+        )
 
     def _is_active_sensor_entity(self, entity_id: str | None) -> bool:
         if not entity_id:
@@ -860,6 +929,14 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             self._disable_auto_switch
             and self._selected_sensor_name != self._physical_sensor_name
         ):
+            if self._preserve_virtual_target:
+                self._log_debug(
+                    "Ignoring external real target change while preserving the virtual target: %s -> %s",
+                    previous_real_target,
+                    real_target,
+                )
+                self._last_snapped_real_target = None
+                return
             if (
                 previous_real_target is not None
                 and self._virtual_target_temperature is not None
@@ -881,6 +958,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                         )
                         self._virtual_target_temperature = new_virtual
                         self._last_real_write_time = time.monotonic()
+                        self._reset_overdrive_state()
+                        self._reset_commanded_targets(single=True, dual=False)
                         self.async_write_ha_state()
             else:
                 self._log_debug(
@@ -889,6 +968,9 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     self._virtual_target_temperature,
                 )
             return
+
+        self._reset_overdrive_state()
+        self._reset_commanded_targets()
 
         self._virtual_target_temperature = self._apply_target_constraints(real_target)
 
@@ -917,9 +999,10 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             self._last_real_target_temp_high = real_high
 
         strict_tolerance = self._pending_request_tolerance()
+        step_size = self.target_temperature_step or 0
         loose_tolerance = max(
             PENDING_REQUEST_TOLERANCE_MAX,
-            (self._target_temp_step or 0) * 0.75,
+            step_size * 0.75,
         )
 
         # Always try to consume pending requests for the current real targets
@@ -929,25 +1012,53 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             low_pending_consumed = self._consume_real_target_request(
                 real_low, strict_tolerance
             )
+            if low_pending_consumed:
+                self._last_snapped_real_target_low = real_low
+            elif self._has_pending_real_target_request(real_low, loose_tolerance):
+                self._consume_real_target_request(real_low, loose_tolerance)
+                self._last_snapped_real_target_low = real_low
+                low_pending_consumed = True
 
         high_pending_consumed = False
         if real_high is not None:
             high_pending_consumed = self._consume_real_target_request(
                 real_high, strict_tolerance
             )
+            if high_pending_consumed:
+                self._last_snapped_real_target_high = real_high
+            elif self._has_pending_real_target_request(real_high, loose_tolerance):
+                self._consume_real_target_request(real_high, loose_tolerance)
+                self._last_snapped_real_target_high = real_high
+                high_pending_consumed = True
 
         if was_not_controlling:
             return
 
         time_since_write = time.monotonic() - self._last_real_write_time
         if time_since_write < POST_WRITE_GRACE_PERIOD:
+            if (
+                real_low is not None
+                and self._last_commanded_real_target_low is not None
+                and math.isclose(
+                    real_low,
+                    self._last_commanded_real_target_low,
+                    abs_tol=loose_tolerance,
+                )
+            ):
+                self._last_snapped_real_target_low = real_low
+            if (
+                real_high is not None
+                and self._last_commanded_real_target_high is not None
+                and math.isclose(
+                    real_high,
+                    self._last_commanded_real_target_high,
+                    abs_tol=loose_tolerance,
+                )
+            ):
+                self._last_snapped_real_target_high = real_high
             return
 
-        abs_tol = (
-            (self._target_temp_step * 0.5)
-            if self._target_temp_step
-            else EXTERNAL_CHANGE_TOLERANCE
-        )
+        abs_tol = (step_size * 0.5) if step_size else EXTERNAL_CHANGE_TOLERANCE
 
         low_changed = (
             real_low is not None
@@ -964,8 +1075,52 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             and not self._has_pending_real_target_request(real_high, loose_tolerance)
         )
 
+        if (
+            low_changed
+            and real_low is not None
+            and self._is_snapped_target_readback(
+                real_val=real_low,
+                commanded_val=self._last_commanded_real_target_low,
+                snapped_val=self._last_snapped_real_target_low,
+                previous_val=previous_low,
+                old_val=None,
+                loose_tolerance=loose_tolerance,
+                abs_tol=abs_tol,
+            )
+        ):
+            self._last_snapped_real_target_low = real_low
+            self._log_debug(
+                "Real low target %s matches snapped/commanded target %s - ignoring as read-back",
+                real_low,
+                self._last_commanded_real_target_low,
+            )
+            low_changed = False
+
+        if (
+            high_changed
+            and real_high is not None
+            and self._is_snapped_target_readback(
+                real_val=real_high,
+                commanded_val=self._last_commanded_real_target_high,
+                snapped_val=self._last_snapped_real_target_high,
+                previous_val=previous_high,
+                old_val=None,
+                loose_tolerance=loose_tolerance,
+                abs_tol=abs_tol,
+            )
+        ):
+            self._last_snapped_real_target_high = real_high
+            self._log_debug(
+                "Real high target %s matches snapped/commanded target %s - ignoring as read-back",
+                real_high,
+                self._last_commanded_real_target_high,
+            )
+            high_changed = False
+
         if not low_changed and not high_changed:
             return
+
+        self._reset_overdrive_state()
 
         _LOGGER.info(
             "Detected external dual setpoint change: low %s -> %s, high %s -> %s",
@@ -979,6 +1134,13 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             self._disable_auto_switch
             and self._selected_sensor_name != self._physical_sensor_name
         ):
+            if self._preserve_virtual_target:
+                self._log_debug(
+                    "Ignoring external dual target change while preserving the virtual targets"
+                )
+                self._last_snapped_real_target_low = None
+                self._last_snapped_real_target_high = None
+                return
             if low_changed and previous_low is not None and real_low is not None:
                 delta = real_low - previous_low
                 if self._virtual_target_temperature_low is not None:
@@ -986,6 +1148,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     new_low = self._apply_target_constraints(derived)
                     if new_low is not None:
                         self._virtual_target_temperature_low = new_low
+                        self._last_commanded_real_target_low = None
+                        self._last_snapped_real_target_low = None
             if high_changed and previous_high is not None and real_high is not None:
                 delta = real_high - previous_high
                 if self._virtual_target_temperature_high is not None:
@@ -993,6 +1157,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     new_high = self._apply_target_constraints(derived)
                     if new_high is not None:
                         self._virtual_target_temperature_high = new_high
+                        self._last_commanded_real_target_high = None
+                        self._last_snapped_real_target_high = None
 
             self._last_real_write_time = time.monotonic()
             self.async_write_ha_state()
@@ -1028,6 +1194,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             self._virtual_target_temperature_high = self._apply_target_constraints(
                 real_high
             )
+
+        self._reset_commanded_targets(single=False, dual=True)
 
         switched = self._selected_sensor_name != self._physical_sensor_name
         self._selected_sensor_name = self._physical_sensor_name
@@ -1112,10 +1280,11 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         )
 
     def _discover_temperature_unit(self) -> str:
-        if self._real_state and (
-            unit := self._real_state.attributes.get("unit_of_measurement")
-        ):
-            return unit
+        if self._real_state:
+            if unit := self._real_state.attributes.get("temperature_unit"):
+                return unit
+            if unit := self._real_state.attributes.get("unit_of_measurement"):
+                return unit
         return self.hass.config.units.temperature_unit or UnitOfTemperature.CELSIUS
 
     def _get_real_current_temperature(self) -> float | None:
@@ -1131,10 +1300,10 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         if value is not None:
             humidity = self._real_state.attributes.get(ATTR_CURRENT_HUMIDITY)
             is_uninitialized_temp = (
-                self.temperature_unit == UnitOfTemperature.FAHRENHEIT
+                self.native_temperature_unit == UnitOfTemperature.FAHRENHEIT
                 and math.isclose(value, UNINITIALIZED_TEMP_FAHRENHEIT, abs_tol=0.1)
             ) or (
-                self.temperature_unit == UnitOfTemperature.CELSIUS
+                self.native_temperature_unit == UnitOfTemperature.CELSIUS
                 and math.isclose(value, UNINITIALIZED_TEMP_CELSIUS, abs_tol=0.1)
             )
             is_below_min = self._min_temp is not None and value < (self._min_temp - 0.1)
@@ -1145,7 +1314,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     self.entity_id,
                     self._real_entity_id,
                     value,
-                    self.temperature_unit or "",
+                    self.native_temperature_unit or "",
                     humidity,
                 )
                 self._mark_entity_health(self._real_entity_id, False)
@@ -1155,29 +1324,48 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         return value
 
     def _get_real_target_temperature(self) -> float | None:
-        if not self._real_state:
+        if not self._real_state or self._real_state.state in (
+            STATE_UNAVAILABLE,
+            STATE_UNKNOWN,
+        ):
             self._mark_entity_health(self._real_entity_id, False)
             return None
         value = _coerce_temperature(self._real_state.attributes.get(ATTR_TEMPERATURE))
         if value is None:
-            self._mark_entity_health(self._real_entity_id, False)
+            if (
+                not self.is_range_mode
+                and self._get_real_target_temperature_low() is None
+            ):
+                self._mark_entity_health(self._real_entity_id, False)
         else:
             self._mark_entity_health(self._real_entity_id, True)
         return value
 
     def _get_real_target_temperature_low(self) -> float | None:
-        if not self._real_state:
+        if not self._real_state or self._real_state.state in (
+            STATE_UNAVAILABLE,
+            STATE_UNKNOWN,
+        ):
             return None
-        return _coerce_temperature(
+        value = _coerce_temperature(
             self._real_state.attributes.get(ATTR_TARGET_TEMP_LOW)
         )
+        if value is not None:
+            self._mark_entity_health(self._real_entity_id, True)
+        return value
 
     def _get_real_target_temperature_high(self) -> float | None:
-        if not self._real_state:
+        if not self._real_state or self._real_state.state in (
+            STATE_UNAVAILABLE,
+            STATE_UNKNOWN,
+        ):
             return None
-        return _coerce_temperature(
+        value = _coerce_temperature(
             self._real_state.attributes.get(ATTR_TARGET_TEMP_HIGH)
         )
+        if value is not None:
+            self._mark_entity_health(self._real_entity_id, True)
+        return value
 
     def _get_real_current_humidity(self) -> float | None:
         if not self._real_state:
@@ -1202,7 +1390,6 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         reference_temp: float | None,
         sensor_temp: float | None,
         not_cooling: bool,
-        label: str = "",
     ) -> float:
         """Evaluate humidity overdrive and return the cooling offset to apply.
 
@@ -1210,7 +1397,11 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         active, 0.0 otherwise.  Sets ``_active_overdrive_humidity`` as a
         side-effect.
         """
-        if self._max_humidity_overcool <= 0 or reference_temp is None:
+        if (
+            self.hvac_mode != HVACMode.COOL
+            or self._max_humidity_overcool <= 0
+            or reference_temp is None
+        ):
             self._active_overdrive_humidity = False
             return 0.0
 
@@ -1245,10 +1436,9 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             self._active_overdrive_humidity = True
             if not was_active:
                 _LOGGER.info(
-                    "Humidity Overdrive active%s: Dehumidification required "
+                    "Humidity Overdrive active: Dehumidification required "
                     "(current: %s%%, target: %s%%) but thermostat idle. "
                     "Applying %s offset.",
-                    label,
                     curr_humidity,
                     self._virtual_target_humidity,
                     OVERDRIVE_ADJUSTMENT_COOL,
@@ -1301,8 +1491,13 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         return new_target
 
     @property
-    def temperature_unit(self) -> str:
+    def native_temperature_unit(self) -> str:
         return self._temperature_unit or self.hass.config.units.temperature_unit
+
+    @property
+    def temperature_unit(self) -> str:
+        """Backward compatibility for Home Assistant < 2026.11."""
+        return self.native_temperature_unit
 
     @property
     def min_temp(self) -> float:
@@ -1320,6 +1515,23 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             return self._max_temp
         return super().max_temp
 
+    def _get_real_target_step(self) -> float:
+        """Return the physical thermostat's effective target step or precision.
+
+        If target_temp_step or precision is not directly exposed by the physical
+        thermostat's state attributes, fall back to standard Home Assistant climate
+        precision for the thermostat's temperature unit (1.0 for Fahrenheit, 0.1 for Celsius).
+        """
+        if self._target_temp_step is not None:
+            return self._target_temp_step
+        if self._precision_override is not None:
+            return self._precision_override
+        if super().target_temperature_step is not None:
+            return super().target_temperature_step
+        if self.native_temperature_unit == UnitOfTemperature.CELSIUS:
+            return PRECISION_TENTHS
+        return PRECISION_WHOLE
+
     @property
     def target_temperature_step(self) -> float | None:
         """Return the physical thermostat's supported target step.
@@ -1329,12 +1541,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         In particular, a sensor may report an integer temporarily even though
         the physical thermostat still supports half-degree targets.
         """
-        base = (
-            self._target_temp_step
-            or self._precision_override
-            or super().target_temperature_step
-        )
-        return base
+        return self._get_real_target_step()
 
     @property
     def precision(self) -> float:
@@ -1383,11 +1590,16 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             return DEFAULT_PRECISION
 
     @property
-    def current_temperature(self) -> float | None:
+    def native_current_temperature(self) -> float | None:
         return (
             self._get_active_sensor_temperature()
             or self._get_real_current_temperature()
         )
+
+    @property
+    def current_temperature(self) -> float | None:
+        """Backward compatibility for Home Assistant < 2026.11."""
+        return self.native_current_temperature
 
     @property
     def current_humidity(self) -> float | None:
@@ -1404,7 +1616,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 return int(self._real_state.attributes[ATTR_MIN_HUMIDITY])
             except (ValueError, TypeError):
                 pass
-        return 30
+        return MIN_TARGET_HUMIDITY
 
     @property
     def max_humidity(self) -> int:
@@ -1413,7 +1625,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 return int(self._real_state.attributes[ATTR_MAX_HUMIDITY])
             except (ValueError, TypeError):
                 pass
-        return 99
+        return MAX_TARGET_HUMIDITY
 
     @property
     def is_range_mode(self) -> bool:
@@ -1425,7 +1637,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         return self.hvac_mode in (HVACMode.HEAT_COOL, HVACMode.AUTO)
 
     @property
-    def target_temperature(self) -> float | None:
+    def native_target_temperature(self) -> float | None:
         if self.is_range_mode:
             return None
         if self._virtual_target_temperature is not None:
@@ -1433,7 +1645,12 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         return self._get_real_target_temperature()
 
     @property
-    def target_temperature_high(self) -> float | None:
+    def target_temperature(self) -> float | None:
+        """Backward compatibility for Home Assistant < 2026.11."""
+        return self.native_target_temperature
+
+    @property
+    def native_target_temperature_high(self) -> float | None:
         if self.is_range_mode:
             if self._virtual_target_temperature_high is not None:
                 return self._virtual_target_temperature_high
@@ -1441,12 +1658,22 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         return None
 
     @property
-    def target_temperature_low(self) -> float | None:
+    def target_temperature_high(self) -> float | None:
+        """Backward compatibility for Home Assistant < 2026.11."""
+        return self.native_target_temperature_high
+
+    @property
+    def native_target_temperature_low(self) -> float | None:
         if self.is_range_mode:
             if self._virtual_target_temperature_low is not None:
                 return self._virtual_target_temperature_low
             return self._get_real_target_temperature_low()
         return None
+
+    @property
+    def target_temperature_low(self) -> float | None:
+        """Backward compatibility for Home Assistant < 2026.11."""
+        return self.native_target_temperature_low
 
     @property
     def hvac_mode(self) -> HVACMode | None:
@@ -1541,81 +1768,179 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         )
         return attrs
 
+    async def _async_set_dual_temperature(
+        self, high: Any, low: Any, kwargs: dict[str, Any]
+    ) -> None:
+        """Handle dual setpoints for range-based modes (Auto/Heat-Cool)."""
+        requested_high = _coerce_temperature(high)
+        requested_low = _coerce_temperature(low)
+
+        display_current = self.native_current_temperature
+        real_current = self._get_real_current_temperature()
+
+        payload: dict[str, Any] = {ATTR_ENTITY_ID: self._real_entity_id}
+        parts = []
+        new_virtual_high: float | None = None
+        new_virtual_low: float | None = None
+
+        if requested_high is not None:
+            constrained_high, real_high = self._calculate_dual_target_real_temperature(
+                requested_high,
+                display_current,
+                real_current,
+                is_cooling=True,
+            )
+            if constrained_high is not None and real_high is not None:
+                payload[ATTR_TARGET_TEMP_HIGH] = real_high
+                parts.append(f"High={constrained_high}")
+                new_virtual_high = constrained_high
+
+        if requested_low is not None:
+            constrained_low, real_low = self._calculate_dual_target_real_temperature(
+                requested_low,
+                display_current,
+                real_current,
+                is_cooling=False,
+            )
+            if constrained_low is not None and real_low is not None:
+                payload[ATTR_TARGET_TEMP_LOW] = real_low
+                parts.append(f"Low={constrained_low}")
+                new_virtual_low = constrained_low
+
+        if ATTR_TARGET_TEMP_LOW in payload and ATTR_TARGET_TEMP_HIGH in payload:
+            p_low = payload[ATTR_TARGET_TEMP_LOW]
+            p_high = payload[ATTR_TARGET_TEMP_HIGH]
+            p_heat = False
+            p_cool = False
+            if display_current is not None:
+                ref_low = (
+                    new_virtual_low
+                    if new_virtual_low is not None
+                    else (self._virtual_target_temperature_low or p_low)
+                )
+                ref_high = (
+                    new_virtual_high
+                    if new_virtual_high is not None
+                    else (self._virtual_target_temperature_high or p_high)
+                )
+                if display_current <= ref_low:
+                    p_heat = True
+                elif display_current >= ref_high:
+                    p_cool = True
+            adj_low, adj_high = self._enforce_min_dual_spread(
+                p_low, p_high, prioritize_heat=p_heat, prioritize_cool=p_cool
+            )
+            payload[ATTR_TARGET_TEMP_LOW] = adj_low
+            payload[ATTR_TARGET_TEMP_HIGH] = adj_high
+        elif ATTR_TARGET_TEMP_LOW in payload:
+            current_high = self._get_real_target_temperature_high()
+            if current_high is not None:
+                adj_low, adj_high = self._enforce_min_dual_spread(
+                    payload[ATTR_TARGET_TEMP_LOW],
+                    current_high,
+                    prioritize_heat=True,
+                )
+                payload[ATTR_TARGET_TEMP_LOW] = adj_low
+                if adj_high != current_high:
+                    payload[ATTR_TARGET_TEMP_HIGH] = adj_high
+        elif ATTR_TARGET_TEMP_HIGH in payload:
+            current_low = self._get_real_target_temperature_low()
+            if current_low is not None:
+                adj_low, adj_high = self._enforce_min_dual_spread(
+                    current_low,
+                    payload[ATTR_TARGET_TEMP_HIGH],
+                    prioritize_cool=True,
+                )
+                payload[ATTR_TARGET_TEMP_HIGH] = adj_high
+                if adj_low != current_low:
+                    payload[ATTR_TARGET_TEMP_LOW] = adj_low
+
+        if ATTR_HVAC_MODE in kwargs and kwargs[ATTR_HVAC_MODE] is not None:
+            payload[ATTR_HVAC_MODE] = kwargs[ATTR_HVAC_MODE]
+
+        actor_name = await self._get_actor_name()
+        suffix = f" (by {actor_name})" if actor_name else ""
+
+        await self.hass.services.async_call(
+            LOGBOOK_DOMAIN,
+            LOGBOOK_SERVICE_LOG,
+            {
+                "name": self.name,
+                "entity_id": self.entity_id,
+                "message": f"Updated dual setpoints: {', '.join(parts)}{suffix}",
+            },
+            blocking=False,
+        )
+
+        previous_state = (
+            self._last_commanded_real_target,
+            self._last_snapped_real_target,
+            self._last_commanded_real_target_low,
+            self._last_snapped_real_target_low,
+            self._last_commanded_real_target_high,
+            self._last_snapped_real_target_high,
+            self._last_real_target_temp_low,
+            self._last_real_target_temp_high,
+            self._last_real_write_time,
+        )
+
+        self._reset_commanded_targets()
+
+        if ATTR_TARGET_TEMP_HIGH in payload:
+            self._record_real_target_request(payload[ATTR_TARGET_TEMP_HIGH])
+            self._last_commanded_real_target_high = payload[ATTR_TARGET_TEMP_HIGH]
+            self._last_snapped_real_target_high = None
+            self._last_real_target_temp_high = payload[ATTR_TARGET_TEMP_HIGH]
+        if ATTR_TARGET_TEMP_LOW in payload:
+            self._record_real_target_request(payload[ATTR_TARGET_TEMP_LOW])
+            self._last_commanded_real_target_low = payload[ATTR_TARGET_TEMP_LOW]
+            self._last_snapped_real_target_low = None
+            self._last_real_target_temp_low = payload[ATTR_TARGET_TEMP_LOW]
+
+        self._last_real_write_time = time.monotonic()
+
+        try:
+            await self.hass.services.async_call(
+                CLIMATE_DOMAIN,
+                SERVICE_SET_TEMPERATURE,
+                payload,
+                blocking=True,
+            )
+        except Exception:
+            (
+                self._last_commanded_real_target,
+                self._last_snapped_real_target,
+                self._last_commanded_real_target_low,
+                self._last_snapped_real_target_low,
+                self._last_commanded_real_target_high,
+                self._last_snapped_real_target_high,
+                self._last_real_target_temp_low,
+                self._last_real_target_temp_high,
+                self._last_real_write_time,
+            ) = previous_state
+            if ATTR_TARGET_TEMP_HIGH in payload:
+                self._remove_real_target_request(payload[ATTR_TARGET_TEMP_HIGH])
+            if ATTR_TARGET_TEMP_LOW in payload:
+                self._remove_real_target_request(payload[ATTR_TARGET_TEMP_LOW])
+            raise
+
+        if new_virtual_high is not None:
+            self._virtual_target_temperature_high = new_virtual_high
+        if new_virtual_low is not None:
+            self._virtual_target_temperature_low = new_virtual_low
+        self.async_write_ha_state()
+
     async def async_set_temperature(self, **kwargs: Any) -> None:
         async with self._command_lock:
             # Reset overdrive state on manual temperature change
-            self._active_overdrive_heat = False
-            self._active_overdrive_cool = False
-            self._active_overdrive_humidity = False
+            self._reset_overdrive_state()
 
             # Handle dual setpoints for range-based modes (Auto/Heat-Cool)
             high = kwargs.get(ATTR_TARGET_TEMP_HIGH)
             low = kwargs.get(ATTR_TARGET_TEMP_LOW)
 
             if high is not None or low is not None:
-                requested_high = _coerce_temperature(high)
-                requested_low = _coerce_temperature(low)
-
-                display_current = self.current_temperature
-                real_current = self._get_real_current_temperature()
-
-                payload = {ATTR_ENTITY_ID: self._real_entity_id}
-                parts = []
-
-                if requested_high is not None:
-                    constrained_high, real_high = (
-                        self._calculate_dual_target_real_temperature(
-                            requested_high, display_current, real_current
-                        )
-                    )
-                    if constrained_high is not None and real_high is not None:
-                        payload[ATTR_TARGET_TEMP_HIGH] = real_high
-                        parts.append(f"High={constrained_high}")
-                        self._virtual_target_temperature_high = constrained_high
-
-                if requested_low is not None:
-                    constrained_low, real_low = (
-                        self._calculate_dual_target_real_temperature(
-                            requested_low, display_current, real_current
-                        )
-                    )
-                    if constrained_low is not None and real_low is not None:
-                        payload[ATTR_TARGET_TEMP_LOW] = real_low
-                        parts.append(f"Low={constrained_low}")
-                        self._virtual_target_temperature_low = constrained_low
-
-                if ATTR_HVAC_MODE in kwargs and kwargs[ATTR_HVAC_MODE] is not None:
-                    payload[ATTR_HVAC_MODE] = kwargs[ATTR_HVAC_MODE]
-
-                actor_name = await self._get_actor_name()
-                suffix = f" (by {actor_name})" if actor_name else ""
-
-                await self.hass.services.async_call(
-                    LOGBOOK_DOMAIN,
-                    LOGBOOK_SERVICE_LOG,
-                    {
-                        "name": self.name,
-                        "entity_id": self.entity_id,
-                        "message": f"Updated dual setpoints: {', '.join(parts)}{suffix}",
-                    },
-                    blocking=False,
-                )
-
-                if ATTR_TARGET_TEMP_HIGH in payload:
-                    self._record_real_target_request(payload[ATTR_TARGET_TEMP_HIGH])
-                if ATTR_TARGET_TEMP_LOW in payload:
-                    self._record_real_target_request(payload[ATTR_TARGET_TEMP_LOW])
-
-                self._last_real_write_time = time.monotonic()
-                self._start_auto_sync_log_suppression()
-
-                await self.hass.services.async_call(
-                    CLIMATE_DOMAIN,
-                    SERVICE_SET_TEMPERATURE,
-                    payload,
-                    blocking=True,
-                )
-                self.async_write_ha_state()
+                await self._async_set_dual_temperature(high, low, kwargs)
                 return
 
             temperature = kwargs.get(ATTR_TEMPERATURE)
@@ -1642,7 +1967,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     constrained_target,
                 )
 
-            display_current = self.current_temperature
+            display_current = self.native_current_temperature
             real_current = self._get_real_current_temperature()
             if display_current is None or real_current is None:
                 _LOGGER.warning(
@@ -1668,6 +1993,18 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 )
                 return
             real_target = self._apply_target_constraints(real_target)
+            if (
+                not self._is_physical_sensor_preset_selected()
+                and real_target is not None
+            ):
+                target_mode = kwargs.get(ATTR_HVAC_MODE) or self.hvac_mode
+                if target_mode in (HVACMode.COOL, HVACMode.HEAT):
+                    real_target = self._prevent_satisfied_rounding_crossover(
+                        desired_real=real_target,
+                        calculated_real=calculated_real_target,
+                        real_current=real_current,
+                        is_cooling=(target_mode == HVACMode.COOL),
+                    )
             payload = {
                 ATTR_ENTITY_ID: self._real_entity_id,
                 ATTR_TEMPERATURE: real_target,
@@ -1690,12 +2027,20 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 previous_state = (
                     self._last_real_target_temp,
                     self._last_real_write_time,
-                    self._suppress_sync_logs_until,
+                    self._last_commanded_real_target,
+                    self._last_snapped_real_target,
+                    self._last_commanded_real_target_low,
+                    self._last_snapped_real_target_low,
+                    self._last_commanded_real_target_high,
+                    self._last_snapped_real_target_high,
                 )
 
+                self._reset_commanded_targets()
+
+                self._last_commanded_real_target = real_target
+                self._last_snapped_real_target = None
                 self._last_real_target_temp = real_target
                 self._last_real_write_time = time.monotonic()
-                self._start_auto_sync_log_suppression()
 
                 await self.hass.services.async_call(
                     CLIMATE_DOMAIN,
@@ -1708,7 +2053,12 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 (
                     self._last_real_target_temp,
                     self._last_real_write_time,
-                    self._suppress_sync_logs_until,
+                    self._last_commanded_real_target,
+                    self._last_snapped_real_target,
+                    self._last_commanded_real_target_low,
+                    self._last_snapped_real_target_low,
+                    self._last_commanded_real_target_high,
+                    self._last_snapped_real_target_high,
                 ) = previous_state
                 self._remove_real_target_request(real_target)
                 raise
@@ -1718,8 +2068,34 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
     async def async_set_humidity(self, humidity: int) -> None:
         """Set new target humidity."""
-        clamped = max(self.min_humidity, min(self.max_humidity, int(humidity)))
+        try:
+            requested = int(humidity)
+        except (ValueError, TypeError):
+            _LOGGER.warning(
+                "Set humidity called with invalid value '%s' for %s",
+                humidity,
+                self.entity_id,
+            )
+            return
+
+        clamped = max(self.min_humidity, min(self.max_humidity, requested))
+        if requested != clamped:
+            _LOGGER.info(
+                "%s target humidity adjusted from %s%% to %s%% to honor limits",
+                self.entity_id,
+                requested,
+                clamped,
+            )
+
+        previous_target = self._virtual_target_humidity
         self._virtual_target_humidity = clamped
+
+        actor_name = await self._get_actor_name()
+        await self._async_log_target_humidity(
+            target_humidity=clamped,
+            previous_target=previous_target,
+            actor_name=actor_name,
+        )
 
         sensor = self._sensor_lookup.get(self._selected_sensor_name)
         if (
@@ -1731,16 +2107,20 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 & ClimateEntityFeature.TARGET_HUMIDITY
             )
         ):
-            await self.hass.services.async_call(
-                CLIMATE_DOMAIN,
-                SERVICE_SET_HUMIDITY,
-                {
-                    ATTR_ENTITY_ID: self._real_entity_id,
-                    ATTR_HUMIDITY: clamped,
-                },
-                context=self._context,
-                blocking=True,
-            )
+            try:
+                await self.hass.services.async_call(
+                    CLIMATE_DOMAIN,
+                    SERVICE_SET_HUMIDITY,
+                    {
+                        ATTR_ENTITY_ID: self._real_entity_id,
+                        ATTR_HUMIDITY: clamped,
+                    },
+                    context=self._context,
+                    blocking=True,
+                )
+            except Exception:
+                self._virtual_target_humidity = previous_target
+                raise
 
         self._schedule_target_realign(trigger_source="humidity")
         self.async_write_ha_state()
@@ -1748,9 +2128,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         self._log_debug("async_set_hvac_mode called with mode: %s", hvac_mode)
         # Reset overdrive state on mode change
-        self._active_overdrive_heat = False
-        self._active_overdrive_cool = False
-        self._active_overdrive_humidity = False
+        self._reset_overdrive_state()
+        self._reset_commanded_targets()
 
         await self.hass.services.async_call(
             CLIMATE_DOMAIN,
@@ -1764,11 +2143,6 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
     async def async_set_fan_mode(self, fan_mode: str) -> None:
         """Set new target fan mode."""
-        from homeassistant.components.climate.const import (
-            ATTR_FAN_MODE,
-            SERVICE_SET_FAN_MODE,
-        )
-
         await self.hass.services.async_call(
             CLIMATE_DOMAIN,
             SERVICE_SET_FAN_MODE,
@@ -1805,7 +2179,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
     async def async_set_preset_mode(self, preset_mode: str) -> None:
         self._log_debug("async_set_preset_mode called with preset: %s", preset_mode)
-        self._active_overdrive_humidity = False
+        self._reset_overdrive_state()
+        self._reset_commanded_targets()
         if preset_mode not in self._sensor_lookup:
             raise ValueError(f"Unknown preset '{preset_mode}'")
 
@@ -1847,7 +2222,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             sensor_entity = (
                 self._real_entity_id if sensor.is_physical else sensor.entity_id
             )
-        unit = self.temperature_unit or ""
+        unit = self.native_temperature_unit or ""
         sensor_temp = self._get_active_sensor_temperature()
         sensor_display = self._format_log_temperature(sensor_temp)
         segments = [f"sensor_name={preset_mode}"]
@@ -1881,7 +2256,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
     ) -> None:
         """Record a logbook entry when we auto-sync to the real thermostat."""
 
-        unit = self.temperature_unit or ""
+        unit = self.native_temperature_unit or ""
         sensor_temp = self._get_active_sensor_temperature()
         real_current = self._get_real_current_temperature()
 
@@ -1971,7 +2346,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
     ) -> None:
         """Record when an external change forces us to the physical preset."""
 
-        unit = self.temperature_unit or ""
+        unit = self.native_temperature_unit or ""
         real_target_display = self._format_log_temperature(real_target)
         target_segment = None
         if real_target_display is not None:
@@ -2000,22 +2375,45 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             blocking=False,
         )
 
-    def _start_auto_sync_log_suppression(self) -> None:
-        """Temporarily silence auto-sync logs after commands we initiate."""
+    async def _async_log_target_humidity(
+        self,
+        target_humidity: int,
+        previous_target: int | None = None,
+        actor_name: str | None = None,
+    ) -> None:
+        """Record a logbook entry when target humidity is set."""
+        sensor = self._sensor_lookup.get(self._selected_sensor_name)
+        if sensor and not sensor.is_physical and sensor.humidity_entity_id:
+            active_humidity_name = self._selected_sensor_name
+            active_humidity_entity_id = sensor.humidity_entity_id
+        else:
+            active_humidity_name = self._physical_sensor_name
+            active_humidity_entity_id = self._real_entity_id
 
-        self._suppress_sync_logs_until = (
-            time.monotonic() + SYNC_LOG_SUPPRESSION_PADDING_SEC
+        segments: list[str] = []
+        if previous_target is not None and previous_target != target_humidity:
+            segments.append(f"previous_target={previous_target}%")
+        sensor_hum = self.current_humidity
+        if sensor_hum is not None:
+            segments.append(f"current_humidity={sensor_hum:.0f}%")
+        segments.append(f"humidity_sensor={active_humidity_name}")
+        segments.append(f"humidity_entity={active_humidity_entity_id}")
+
+        suffix = f" (by {actor_name})" if actor_name else ""
+        context_text = f": {' | '.join(segments)}" if segments else ""
+        message = f"Target humidity set to {target_humidity}%{suffix}{context_text}"
+        _LOGGER.info("%s %s", self.entity_id, message)
+
+        await self.hass.services.async_call(
+            LOGBOOK_DOMAIN,
+            LOGBOOK_SERVICE_LOG,
+            {
+                "name": self.name,
+                "entity_id": self.entity_id,
+                "message": message,
+            },
+            blocking=False,
         )
-
-    def _should_log_auto_sync(self) -> bool:
-        """Return True if we're outside the suppression window."""
-
-        if self._suppress_sync_logs_until is None:
-            return True
-        if time.monotonic() >= self._suppress_sync_logs_until:
-            self._suppress_sync_logs_until = None
-            return True
-        return False
 
     def _did_just_meet_target(self, sensor_temp: float) -> bool:
         """Check if active sensor just crossed/met any target temperature."""
@@ -2082,6 +2480,97 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
         return False
 
+    def _evaluate_single_target_overdrive(
+        self, sensor_temp: float
+    ) -> tuple[bool, float]:
+        """Evaluate temperature and humidity overdrive for single-setpoint mode."""
+        overdrive_active = False
+        overdrive_adjust = 0.0
+
+        if (
+            self._is_remote_sensor_controlling()
+            and self._real_state
+            and self.hvac_mode in (HVACMode.HEAT, HVACMode.COOL)
+        ):
+            real_action = self._real_state.attributes.get(ATTR_HVAC_ACTION)
+            tolerance = max(self.precision or DEFAULT_PRECISION, 0.1)
+            deadband = max(tolerance, self._sensor_change_threshold)
+
+            # Heat Mode Stall
+            if self.hvac_mode == HVACMode.HEAT:
+                # Hysteresis: start when exceeding deadband, maintain until target met
+                if not self._active_overdrive_heat:
+                    want_heat = self._virtual_target_temperature > (
+                        sensor_temp + deadband
+                    )
+                else:
+                    want_heat = self._virtual_target_temperature > (
+                        sensor_temp + tolerance
+                    )
+
+                not_heating = real_action != HVACAction.HEATING
+                if (
+                    self._overdrive_offset > 0
+                    and want_heat
+                    and (not_heating or self._active_overdrive_heat)
+                ):
+                    self._active_overdrive_heat = True
+                    overdrive_active = True
+                    # Push target up to force start
+                    overdrive_adjust = self._overdrive_offset
+                    _LOGGER.info(
+                        "Overdrive active: Heating required but thermostat idle. Applying +%s offset.",
+                        overdrive_adjust,
+                    )
+                else:
+                    self._active_overdrive_heat = False
+
+            # Cool Mode Stall
+            elif self.hvac_mode == HVACMode.COOL:
+                # Hysteresis: start when exceeding deadband, maintain until target met
+                if not self._active_overdrive_cool:
+                    want_cool = self._virtual_target_temperature < (
+                        sensor_temp - deadband
+                    )
+                else:
+                    want_cool = self._virtual_target_temperature < (
+                        sensor_temp - tolerance
+                    )
+
+                not_cooling = real_action != HVACAction.COOLING
+                if (
+                    self._overdrive_offset > 0
+                    and want_cool
+                    and (not_cooling or self._active_overdrive_cool)
+                ):
+                    self._active_overdrive_cool = True
+                    overdrive_active = True
+                    # Push target down to force start
+                    overdrive_adjust = -self._overdrive_offset
+                    _LOGGER.info(
+                        "Overdrive active: Cooling required but thermostat idle. Applying %s offset.",
+                        overdrive_adjust,
+                    )
+                else:
+                    self._active_overdrive_cool = False
+
+                # Humidity Overdrive: if temperature setpoint is satisfied, but humidity is still high
+                if not want_cool:
+                    humidity_adjust = self._evaluate_humidity_overdrive(
+                        self._virtual_target_temperature,
+                        sensor_temp,
+                        not_cooling,
+                    )
+                    if humidity_adjust != 0.0:
+                        overdrive_active = True
+                        overdrive_adjust = humidity_adjust
+                else:
+                    self._active_overdrive_humidity = False
+        else:
+            self._reset_overdrive_state()
+
+        return overdrive_active, overdrive_adjust
+
     async def _async_realign_real_target_from_sensor(
         self, retry: bool = False, trigger_source: str | None = None
     ) -> None:
@@ -2099,6 +2588,13 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 self._get_real_target_temperature()
             )
             if self._virtual_target_temperature is None:
+                return
+
+        if trigger_source == "sensor":
+            active_sensor_temp = self._get_active_sensor_temperature()
+            if active_sensor_temp is not None and self._should_skip_sensor_realign(
+                active_sensor_temp, trigger_source
+            ):
                 return
 
         now = time.monotonic()
@@ -2168,89 +2664,35 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
             # Overdrive Logic: Check if we are stalled
             # Stalled = Target not met AND Real Thermostat is Idle
-            overdrive_active = False
-            overdrive_adjust = 0.0
-
-            if self._real_state and self.hvac_mode in (HVACMode.HEAT, HVACMode.COOL):
-                real_action = self._real_state.attributes.get(ATTR_HVAC_ACTION)
-                tolerance = max(self.precision or DEFAULT_PRECISION, 0.1)
-                deadband = max(tolerance, self._sensor_change_threshold)
-
-                # Heat Mode Stall
-                if self.hvac_mode == HVACMode.HEAT:
-                    # Hysteresis: start when exceeding deadband, maintain until target met
-                    if not self._active_overdrive_heat:
-                        want_heat = self._virtual_target_temperature > (
-                            sensor_temp + deadband
-                        )
-                    else:
-                        want_heat = self._virtual_target_temperature > (
-                            sensor_temp + tolerance
-                        )
-
-                    not_heating = real_action != HVACAction.HEATING
-                    if want_heat and (not_heating or self._active_overdrive_heat):
-                        self._active_overdrive_heat = True
-                        overdrive_active = True
-                        # Push target up to force start
-                        overdrive_adjust = (
-                            OVERDRIVE_ADJUSTMENT_HEAT  # Degree matching unit
-                        )
-                        _LOGGER.info(
-                            "Overdrive active: Heating required but thermostat idle. Applying +%s offset.",
-                            overdrive_adjust,
-                        )
-                    else:
-                        self._active_overdrive_heat = False
-
-                # Cool Mode Stall
-                elif self.hvac_mode == HVACMode.COOL:
-                    # Hysteresis: start when exceeding deadband, maintain until target met
-                    if not self._active_overdrive_cool:
-                        want_cool = self._virtual_target_temperature < (
-                            sensor_temp - deadband
-                        )
-                    else:
-                        want_cool = self._virtual_target_temperature < (
-                            sensor_temp - tolerance
-                        )
-
-                    not_cooling = real_action != HVACAction.COOLING
-                    if want_cool and (not_cooling or self._active_overdrive_cool):
-                        self._active_overdrive_cool = True
-                        overdrive_active = True
-                        # Push target down to force start
-                        overdrive_adjust = OVERDRIVE_ADJUSTMENT_COOL
-                        _LOGGER.info(
-                            "Overdrive active: Cooling required but thermostat idle. Applying %s offset.",
-                            overdrive_adjust,
-                        )
-                    else:
-                        self._active_overdrive_cool = False
-
-                    # Humidity Overdrive: if temperature setpoint is satisfied, but humidity is still high
-                    if not want_cool:
-                        humidity_adjust = self._evaluate_humidity_overdrive(
-                            self._virtual_target_temperature,
-                            sensor_temp,
-                            not_cooling,
-                        )
-                        if humidity_adjust != 0.0:
-                            overdrive_active = True
-                            overdrive_adjust = humidity_adjust
-                    else:
-                        self._active_overdrive_humidity = False
+            overdrive_active, overdrive_adjust = self._evaluate_single_target_overdrive(
+                sensor_temp
+            )
 
             if overdrive_active:
-                calculated_real_target = calculated_real_target + overdrive_adjust
+                if self._active_overdrive_humidity:
+                    # In humidity overdrive, temperature is satisfied (delta >= 0).
+                    # Clamp the positive temperature delta so it does not cancel out
+                    # the negative dehumidification overdrive adjustment.
+                    calculated_real_target = (
+                        real_current + min(0.0, delta) + overdrive_adjust
+                    )
+                else:
+                    calculated_real_target = calculated_real_target + overdrive_adjust
 
             desired_real_target = self._apply_safety_clamp(
                 calculated_real_target,
                 reference_target=self._virtual_target_temperature,
             )
+            desired_real_target = self._apply_target_constraints(desired_real_target)
             if desired_real_target is None:
                 return
-            desired_real_target = self._apply_target_constraints(desired_real_target)
+            if self.hvac_mode in (HVACMode.COOL, HVACMode.HEAT):
+                desired_real_target = self._prevent_satisfied_rounding_crossover(
+                    desired_real_target,
+                    calculated_real_target,
+                    real_current,
+                    is_cooling=(self.hvac_mode == HVACMode.COOL),
+                )
 
             current_real_target = self._get_real_target_temperature()
             # We must be strict here; if the step is 1.0, 66 vs 67 must be seen as different.
@@ -2263,6 +2705,28 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             if current_real_target is not None and math.isclose(
                 current_real_target, desired_real_target, abs_tol=target_tolerance
             ):
+                return
+
+            if (
+                current_real_target is not None
+                and self._last_commanded_real_target is not None
+                and self._last_snapped_real_target is not None
+                and math.isclose(
+                    desired_real_target,
+                    self._last_commanded_real_target,
+                    abs_tol=target_tolerance,
+                )
+                and math.isclose(
+                    current_real_target,
+                    self._last_snapped_real_target,
+                    abs_tol=target_tolerance,
+                )
+            ):
+                self._log_debug(
+                    "Real thermostat already at snapped target %s for commanded target %s; skipping write",
+                    current_real_target,
+                    desired_real_target,
+                )
                 return
 
             pending_tolerance = self._pending_request_tolerance()
@@ -2296,12 +2760,22 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 previous_state = (
                     self._last_real_target_temp,
                     self._last_real_write_time,
-                    self._suppress_sync_logs_until,
+                    self._last_commanded_real_target,
+                    self._last_snapped_real_target,
                 )
+
+                step_size = self.target_temperature_step or 0
+                loose_tolerance = max(PENDING_REQUEST_TOLERANCE_MAX, step_size * 0.75)
+                self._last_commanded_real_target = desired_real_target
+                if current_real_target is not None and math.isclose(
+                    current_real_target, desired_real_target, abs_tol=loose_tolerance
+                ):
+                    self._last_snapped_real_target = current_real_target
+                else:
+                    self._last_snapped_real_target = None
 
                 self._last_real_target_temp = desired_real_target
                 self._last_real_write_time = time.monotonic()
-                self._start_auto_sync_log_suppression()
 
                 await self.hass.services.async_call(
                     CLIMATE_DOMAIN,
@@ -2317,7 +2791,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 (
                     self._last_real_target_temp,
                     self._last_real_write_time,
-                    self._suppress_sync_logs_until,
+                    self._last_commanded_real_target,
+                    self._last_snapped_real_target,
                 ) = previous_state
                 self._remove_real_target_request(desired_real_target)
 
@@ -2333,6 +2808,86 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                         desired_real_target,
                         err,
                     )
+
+    def _evaluate_dual_target_overdrive(
+        self,
+        sensor_temp: float,
+        calculated_real_low: float | None,
+        calculated_real_high: float | None,
+    ) -> tuple[float, float]:
+        """Evaluate overdrive adjustments for dual-setpoint mode."""
+        overdrive_adjust_low = 0.0
+        overdrive_adjust_high = 0.0
+
+        if (
+            self._is_remote_sensor_controlling()
+            and self._overdrive_offset > 0
+            and self._real_state
+            and self.hvac_mode
+            in (
+                HVACMode.HEAT,
+                HVACMode.COOL,
+                HVACMode.HEAT_COOL,
+                HVACMode.AUTO,
+            )
+        ):
+            real_action = self._real_state.attributes.get(ATTR_HVAC_ACTION)
+            tolerance = max(self.precision or DEFAULT_PRECISION, 0.1)
+            deadband = max(tolerance, self._sensor_change_threshold)
+
+            if (
+                self._virtual_target_temperature_low is not None
+                and calculated_real_low is not None
+            ):
+                if not self._active_overdrive_heat:
+                    want_heat = sensor_temp < (
+                        self._virtual_target_temperature_low - deadband
+                    )
+                else:
+                    want_heat = sensor_temp < (
+                        self._virtual_target_temperature_low - tolerance
+                    )
+
+                not_heating = real_action != HVACAction.HEATING
+                if want_heat and (not_heating or self._active_overdrive_heat):
+                    self._active_overdrive_heat = True
+                    overdrive_adjust_low = self._overdrive_offset
+                    _LOGGER.info(
+                        "Overdrive active (dual low): Heating required but thermostat idle. Applying +%s offset.",
+                        overdrive_adjust_low,
+                    )
+                else:
+                    self._active_overdrive_heat = False
+
+            if (
+                self._virtual_target_temperature_high is not None
+                and calculated_real_high is not None
+            ):
+                if not self._active_overdrive_cool:
+                    want_cool = sensor_temp > (
+                        self._virtual_target_temperature_high + deadband
+                    )
+                else:
+                    want_cool = sensor_temp > (
+                        self._virtual_target_temperature_high + tolerance
+                    )
+
+                not_cooling = real_action != HVACAction.COOLING
+                if want_cool and (not_cooling or self._active_overdrive_cool):
+                    self._active_overdrive_cool = True
+                    overdrive_adjust_high = -self._overdrive_offset
+                    _LOGGER.info(
+                        "Overdrive active (dual high): Cooling required but thermostat idle. Applying %s offset.",
+                        overdrive_adjust_high,
+                    )
+                else:
+                    self._active_overdrive_cool = False
+
+                self._active_overdrive_humidity = False
+        else:
+            self._reset_overdrive_state()
+
+        return overdrive_adjust_low, overdrive_adjust_high
 
     async def _async_realign_dual_targets(
         self, sensor_temp: float, real_current: float
@@ -2367,83 +2922,41 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             real_current + delta_high if delta_high is not None else None
         )
 
-        overdrive_adjust_low = 0.0
-        overdrive_adjust_high = 0.0
-
-        if self._real_state and self.hvac_mode in (
-            HVACMode.HEAT,
-            HVACMode.COOL,
-            HVACMode.HEAT_COOL,
-            HVACMode.AUTO,
-        ):
-            real_action = self._real_state.attributes.get(ATTR_HVAC_ACTION)
-            tolerance = max(self.precision or DEFAULT_PRECISION, 0.1)
-            deadband = max(tolerance, self._sensor_change_threshold)
-
-            if (
-                self._virtual_target_temperature_low is not None
-                and calculated_real_low is not None
-            ):
-                if not self._active_overdrive_heat:
-                    want_heat = sensor_temp < (
-                        self._virtual_target_temperature_low - deadband
-                    )
-                else:
-                    want_heat = sensor_temp < (
-                        self._virtual_target_temperature_low - tolerance
-                    )
-
-                not_heating = real_action != HVACAction.HEATING
-                if want_heat and (not_heating or self._active_overdrive_heat):
-                    self._active_overdrive_heat = True
-                    overdrive_adjust_low = OVERDRIVE_ADJUSTMENT_HEAT
-                    _LOGGER.info(
-                        "Overdrive active (dual low): Heating required but thermostat idle. Applying +%s offset.",
-                        overdrive_adjust_low,
-                    )
-                else:
-                    self._active_overdrive_heat = False
-
-            if (
-                self._virtual_target_temperature_high is not None
-                and calculated_real_high is not None
-            ):
-                if not self._active_overdrive_cool:
-                    want_cool = sensor_temp > (
-                        self._virtual_target_temperature_high + deadband
-                    )
-                else:
-                    want_cool = sensor_temp > (
-                        self._virtual_target_temperature_high + tolerance
-                    )
-
-                not_cooling = real_action != HVACAction.COOLING
-                if want_cool and (not_cooling or self._active_overdrive_cool):
-                    self._active_overdrive_cool = True
-                    overdrive_adjust_high = OVERDRIVE_ADJUSTMENT_COOL
-                    _LOGGER.info(
-                        "Overdrive active (dual high): Cooling required but thermostat idle. Applying %s offset.",
-                        overdrive_adjust_high,
-                    )
-                else:
-                    self._active_overdrive_cool = False
-
-                if not want_cool:
-                    humidity_adjust = self._evaluate_humidity_overdrive(
-                        self._virtual_target_temperature_high,
-                        sensor_temp,
-                        not_cooling,
-                        label=" (dual high)",
-                    )
-                    if humidity_adjust != 0.0:
-                        overdrive_adjust_high = humidity_adjust
-                else:
-                    self._active_overdrive_humidity = False
+        overdrive_adjust_low, overdrive_adjust_high = (
+            self._evaluate_dual_target_overdrive(
+                sensor_temp, calculated_real_low, calculated_real_high
+            )
+        )
 
         if calculated_real_low is not None and overdrive_adjust_low != 0.0:
             calculated_real_low += overdrive_adjust_low
         if calculated_real_high is not None and overdrive_adjust_high != 0.0:
             calculated_real_high += overdrive_adjust_high
+
+        prioritize_heat = (
+            overdrive_adjust_low > 0.0
+            or self._active_overdrive_heat
+            or (
+                self._virtual_target_temperature_low is not None
+                and sensor_temp < self._virtual_target_temperature_low
+            )
+        )
+        prioritize_cool = (
+            overdrive_adjust_high < 0.0
+            or self._active_overdrive_cool
+            or (
+                self._virtual_target_temperature_high is not None
+                and sensor_temp > self._virtual_target_temperature_high
+            )
+        )
+
+        if calculated_real_low is not None and calculated_real_high is not None:
+            calculated_real_low, calculated_real_high = self._enforce_min_dual_spread(
+                calculated_real_low,
+                calculated_real_high,
+                prioritize_heat=prioritize_heat,
+                prioritize_cool=prioritize_cool,
+            )
 
         desired_real_low = (
             self._apply_target_constraints(
@@ -2466,20 +2979,69 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             else None
         )
 
+        if desired_real_low is not None and calculated_real_low is not None:
+            desired_real_low = self._prevent_satisfied_rounding_crossover(
+                desired_real_low, calculated_real_low, real_current, is_cooling=False
+            )
+        if desired_real_high is not None and calculated_real_high is not None:
+            desired_real_high = self._prevent_satisfied_rounding_crossover(
+                desired_real_high, calculated_real_high, real_current, is_cooling=True
+            )
+
+        if desired_real_low is not None and desired_real_high is not None:
+            desired_real_low, desired_real_high = self._enforce_min_dual_spread(
+                desired_real_low,
+                desired_real_high,
+                prioritize_heat=prioritize_heat,
+                prioritize_cool=prioritize_cool,
+            )
+
         current_real_low = self._get_real_target_temperature_low()
         current_real_high = self._get_real_target_temperature_high()
         target_tolerance = REALIGN_TARGET_TOLERANCE
 
         low_matches = desired_real_low is None or (
             current_real_low is not None
-            and math.isclose(
-                current_real_low, desired_real_low, abs_tol=target_tolerance
+            and (
+                math.isclose(
+                    current_real_low, desired_real_low, abs_tol=target_tolerance
+                )
+                or (
+                    self._last_commanded_real_target_low is not None
+                    and self._last_snapped_real_target_low is not None
+                    and math.isclose(
+                        desired_real_low,
+                        self._last_commanded_real_target_low,
+                        abs_tol=target_tolerance,
+                    )
+                    and math.isclose(
+                        current_real_low,
+                        self._last_snapped_real_target_low,
+                        abs_tol=target_tolerance,
+                    )
+                )
             )
         )
         high_matches = desired_real_high is None or (
             current_real_high is not None
-            and math.isclose(
-                current_real_high, desired_real_high, abs_tol=target_tolerance
+            and (
+                math.isclose(
+                    current_real_high, desired_real_high, abs_tol=target_tolerance
+                )
+                or (
+                    self._last_commanded_real_target_high is not None
+                    and self._last_snapped_real_target_high is not None
+                    and math.isclose(
+                        desired_real_high,
+                        self._last_commanded_real_target_high,
+                        abs_tol=target_tolerance,
+                    )
+                    and math.isclose(
+                        current_real_high,
+                        self._last_snapped_real_target_high,
+                        abs_tol=target_tolerance,
+                    )
+                )
             )
         )
 
@@ -2517,7 +3079,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         if overdrive_active:
             reason += " (overdrive)"
 
-        unit = self.temperature_unit or ""
+        unit = self.native_temperature_unit or ""
         message = (
             "Adjusted dual setpoints on %s to %s (%s): sensor=%s%s, real_current=%s%s"
             % (
@@ -2544,11 +3106,34 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
         previous_state = (
             self._last_real_write_time,
-            self._suppress_sync_logs_until,
+            self._last_commanded_real_target_low,
+            self._last_snapped_real_target_low,
+            self._last_commanded_real_target_high,
+            self._last_snapped_real_target_high,
         )
 
+        step_size = self.target_temperature_step or 0
+        loose_tolerance = max(PENDING_REQUEST_TOLERANCE_MAX, step_size * 0.75)
+
+        if desired_real_low is not None:
+            self._last_commanded_real_target_low = desired_real_low
+            if current_real_low is not None and math.isclose(
+                current_real_low, desired_real_low, abs_tol=loose_tolerance
+            ):
+                self._last_snapped_real_target_low = current_real_low
+            else:
+                self._last_snapped_real_target_low = None
+
+        if desired_real_high is not None:
+            self._last_commanded_real_target_high = desired_real_high
+            if current_real_high is not None and math.isclose(
+                current_real_high, desired_real_high, abs_tol=loose_tolerance
+            ):
+                self._last_snapped_real_target_high = current_real_high
+            else:
+                self._last_snapped_real_target_high = None
+
         self._last_real_write_time = time.monotonic()
-        self._start_auto_sync_log_suppression()
 
         try:
             await self.hass.services.async_call(
@@ -2560,7 +3145,10 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         except Exception as err:
             (
                 self._last_real_write_time,
-                self._suppress_sync_logs_until,
+                self._last_commanded_real_target_low,
+                self._last_snapped_real_target_low,
+                self._last_commanded_real_target_high,
+                self._last_snapped_real_target_high,
             ) = previous_state
             if desired_real_low is not None:
                 self._remove_real_target_request(desired_real_low)
@@ -2771,6 +3359,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         requested_temp: float,
         display_current: float | None,
         real_current: float | None,
+        is_cooling: bool = False,
     ) -> tuple[float | None, float | None]:
         """Calculate constrained virtual setpoint and real setpoint for dual setpoints."""
         constrained = self._apply_target_constraints(requested_temp)
@@ -2789,7 +3378,41 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         real_temp = self._apply_target_constraints(
             self._apply_safety_clamp(calc_real, reference_target=constrained)
         )
+        if (
+            not self._is_physical_sensor_preset_selected()
+            and real_temp is not None
+            and real_current is not None
+        ):
+            real_temp = self._prevent_satisfied_rounding_crossover(
+                real_temp, calc_real, real_current, is_cooling=is_cooling
+            )
         return constrained, real_temp
+
+    def _prevent_satisfied_rounding_crossover(
+        self,
+        desired_real: float,
+        calculated_real: float,
+        real_current: float,
+        is_cooling: bool,
+    ) -> float:
+        """Prevent step-rounding from collapsing a satisfied positive/negative delta onto real_current.
+
+        When the remote sensor is satisfied (e.g. cooler than virtual_target_high in cooling mode,
+        so calculated_real > real_current), rounding down to <= real_current would cause the physical
+        thermostat to kick on cooling even though the room is already cold enough.
+        """
+        step = self.target_temperature_step or PRECISION_WHOLE
+        if is_cooling:
+            if calculated_real > real_current and desired_real <= real_current:
+                candidate = self._apply_target_constraints(real_current + step)
+                if candidate is not None and candidate > real_current:
+                    return candidate
+        else:
+            if calculated_real < real_current and desired_real >= real_current:
+                candidate = self._apply_target_constraints(real_current - step)
+                if candidate is not None and candidate < real_current:
+                    return candidate
+        return desired_real
 
     def _apply_target_constraints(self, value: float | None) -> float | None:
         if value is None:
@@ -2814,6 +3437,101 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             result = min(result, max_temp)
         return self._round_temperature(result)
 
+    def _get_min_dual_temp_spread(self) -> float:
+        """Return the minimum spread required between low and high targets."""
+        if self._min_dual_temp_spread is not None and self._min_dual_temp_spread > 0:
+            return self._min_dual_temp_spread
+        if self.native_temperature_unit == UnitOfTemperature.CELSIUS:
+            return DEFAULT_MIN_DUAL_TEMP_SPREAD_CELSIUS
+        return DEFAULT_MIN_DUAL_TEMP_SPREAD_FAHRENHEIT
+
+    def _enforce_min_dual_spread(
+        self,
+        low: float,
+        high: float,
+        prioritize_heat: bool = False,
+        prioritize_cool: bool = False,
+    ) -> tuple[float, float]:
+        """Ensure the spread between low and high targets satisfies the minimum required spread."""
+        min_spread = self._get_min_dual_temp_spread()
+        if (high - low) >= (min_spread - SPREAD_TOLERANCE):
+            return low, high
+
+        if (
+            self.min_temp is not None
+            and self.max_temp is not None
+            and (self.max_temp - self.min_temp) < min_spread
+        ):
+            return self.min_temp, self.max_temp
+
+        shortfall = min_spread - (high - low)
+        if prioritize_heat and not prioritize_cool:
+            new_low = low
+            new_high = low + min_spread
+            if self.max_temp is not None and new_high > self.max_temp:
+                new_high = self.max_temp
+                new_low = new_high - min_spread
+                if self.min_temp is not None and new_low < self.min_temp:
+                    new_low = self.min_temp
+        elif prioritize_cool and not prioritize_heat:
+            new_high = high
+            new_low = high - min_spread
+            if self.min_temp is not None and new_low < self.min_temp:
+                new_low = self.min_temp
+                new_high = new_low + min_spread
+                if self.max_temp is not None and new_high > self.max_temp:
+                    new_high = self.max_temp
+        else:
+            half = shortfall / 2.0
+            new_low = low - half
+            new_high = high + half
+            if self.min_temp is not None and new_low < self.min_temp:
+                new_low = self.min_temp
+                new_high = min(
+                    self.max_temp if self.max_temp is not None else float("inf"),
+                    new_low + min_spread,
+                )
+            elif self.max_temp is not None and new_high > self.max_temp:
+                new_high = self.max_temp
+                new_low = max(
+                    self.min_temp if self.min_temp is not None else float("-inf"),
+                    new_high - min_spread,
+                )
+
+        constrained_low = self._apply_target_constraints(new_low)
+        constrained_high = self._apply_target_constraints(new_high)
+        if constrained_low is not None and constrained_high is not None:
+            new_low, new_high = constrained_low, constrained_high
+
+        step = self._get_real_target_step()
+        if (new_high - new_low) < (min_spread - SPREAD_TOLERANCE):
+            if prioritize_heat and not prioritize_cool:
+                candidate_high = self._apply_target_constraints(new_low + min_spread)
+                if candidate_high is not None:
+                    new_high = candidate_high
+                if (new_high - new_low) < (min_spread - SPREAD_TOLERANCE):
+                    candidate_high = self._apply_target_constraints(new_high + step)
+                    if candidate_high is not None:
+                        new_high = candidate_high
+            elif prioritize_cool and not prioritize_heat:
+                candidate_low = self._apply_target_constraints(new_high - min_spread)
+                if candidate_low is not None:
+                    new_low = candidate_low
+                if (new_high - new_low) < (min_spread - SPREAD_TOLERANCE):
+                    candidate_low = self._apply_target_constraints(new_low - step)
+                    if candidate_low is not None:
+                        new_low = candidate_low
+            else:
+                candidate_high = self._apply_target_constraints(new_low + min_spread)
+                if candidate_high is not None:
+                    new_high = candidate_high
+                if (new_high - new_low) < (min_spread - SPREAD_TOLERANCE):
+                    candidate_high = self._apply_target_constraints(new_high + step)
+                    if candidate_high is not None:
+                        new_high = candidate_high
+
+        return new_low, new_high
+
     def _apply_safety_clamp(
         self,
         calculated_target: float | None,
@@ -2835,7 +3553,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         )
 
         # 1. Enforce max_sync_offset relative to the reference target temperature
-        if self._max_sync_offset is not None and ref_target is not None:
+        if self._max_sync_offset and ref_target is not None:
             min_allowed_offset = ref_target - self._max_sync_offset
             max_allowed_offset = ref_target + self._max_sync_offset
 
@@ -2884,7 +3602,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             limit_value = effective_max
 
         if clamped:
-            unit = self.temperature_unit or ""
+            unit = self.native_temperature_unit or ""
             limit_source = (
                 "max_sync_offset"
                 if clamp_reason and clamp_reason.startswith("max_sync_offset")
@@ -2958,7 +3676,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
     ) -> None:
         if desired_target is None:
             return
-        unit = self.temperature_unit or ""
+        unit = self.native_temperature_unit or ""
         sensor_display = self._format_log_temperature(sensor_temp)
         virtual_display = self._format_log_temperature(virtual_target)
         real_display = self._format_log_temperature(real_current)

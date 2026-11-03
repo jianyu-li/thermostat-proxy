@@ -8,3 +8,5 @@ __pycache__/
 .agent/
 .pytest_cache/
 .venv*
+.coverage*
+coverage.xml

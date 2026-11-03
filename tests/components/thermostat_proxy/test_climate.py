@@ -1,14 +1,10 @@
 """Tests for the Thermostat Proxy climate platform."""
 
-from unittest.mock import AsyncMock, MagicMock
 import pytest
 
-from homeassistant.core import HomeAssistant, State
-from homeassistant.components.climate import ClimateEntityFeature, HVACMode
 from custom_components.thermostat_proxy.climate import CustomThermostatEntity
-
-
-
+from homeassistant.components.climate import ClimateEntityFeature, HVACMode
+from homeassistant.core import State
 
 
 def create_proxy(hass, thermostat="climate.real", sensors=None, target_temp_step=1.0):
@@ -117,6 +113,7 @@ async def test_pending_request_tolerance_covers_step(hass):
     tolerance = proxy._pending_request_tolerance()
     assert tolerance == 0.25
 
+
 @pytest.mark.asyncio
 async def test_overdrive_short_cycling_and_threshold(hass):
     """Test that overdrive respects the threshold as a deadband and remains sticky."""
@@ -125,7 +122,7 @@ async def test_overdrive_short_cycling_and_threshold(hass):
     proxy._virtual_target_temperature = 72.6
     proxy._last_real_target_temp = 72.6
     proxy._selected_sensor_name = "Sensor 1"
-    
+
     mock_real_state = State(
         "climate.real",
         HVACMode.COOL,
@@ -136,31 +133,35 @@ async def test_overdrive_short_cycling_and_threshold(hass):
             "hvac_action": "idle",
         },
     )
-    
+
     mock_sensor_state = State("sensor.1", "72.6")
-    
+
     hass.states.async_set("sensor.1", "72.6")
     proxy._real_state = mock_real_state
     proxy._sensor_states["sensor.1"] = mock_sensor_state
-    
+
     # Run a dummy sync to setup state
     await proxy._async_realign_real_target_from_sensor(trigger_source="sensor")
     assert not proxy._active_overdrive_cool
-    
+
     # Case 1: Room warms up slightly to 72.9 (within 0.5 threshold)
     mock_sensor_state = State("sensor.1", "72.9")
     proxy._sensor_states["sensor.1"] = mock_sensor_state
-    await proxy._async_realign_real_target_from_sensor(trigger_source="cooldown_expired")
+    await proxy._async_realign_real_target_from_sensor(
+        trigger_source="cooldown_expired"
+    )
     # Should NOT trigger overdrive because 72.6 < (72.9 - 0.5) is False
     assert not proxy._active_overdrive_cool
-    
+
     # Case 2: Room warms up to 73.2 (exceeds 0.5 threshold deadband)
     mock_sensor_state = State("sensor.1", "73.2")
     proxy._sensor_states["sensor.1"] = mock_sensor_state
-    await proxy._async_realign_real_target_from_sensor(trigger_source="cooldown_expired")
+    await proxy._async_realign_real_target_from_sensor(
+        trigger_source="cooldown_expired"
+    )
     # SHOULD trigger overdrive because 72.6 < (73.2 - 0.5) is True
     assert proxy._active_overdrive_cool
-    
+
     # Case 3: The physical thermostat starts cooling, but then stops prematurely (short cycling simulation)
     # The room dropped to 73.0. 73.0 is within the threshold but above the target.
     mock_real_state = State(
@@ -168,22 +169,98 @@ async def test_overdrive_short_cycling_and_threshold(hass):
         HVACMode.COOL,
         {
             "current_temperature": 73.0,
-            "temperature": 71.6, # target pushed down
+            "temperature": 71.6,  # target pushed down
             "target_temp_step": 0.1,
-            "hvac_action": "idle", # Premature idle
+            "hvac_action": "idle",  # Premature idle
         },
     )
     mock_sensor_state = State("sensor.1", "73.0")
     proxy._real_state = mock_real_state
     proxy._sensor_states["sensor.1"] = mock_sensor_state
-    
-    await proxy._async_realign_real_target_from_sensor(trigger_source="cooldown_expired")
+
+    await proxy._async_realign_real_target_from_sensor(
+        trigger_source="cooldown_expired"
+    )
     # Overdrive should still be true because we haven't reached target yet (72.6 < 73.0 - 0.1)!
     assert proxy._active_overdrive_cool
 
     # Case 4: Target is finally met
     mock_sensor_state = State("sensor.1", "72.5")
     proxy._sensor_states["sensor.1"] = mock_sensor_state
-    await proxy._async_realign_real_target_from_sensor(trigger_source="cooldown_expired")
+    await proxy._async_realign_real_target_from_sensor(
+        trigger_source="cooldown_expired"
+    )
     # Target reached, overdrive should deactivate
     assert not proxy._active_overdrive_cool
+
+
+@pytest.mark.asyncio
+async def test_native_temperature_properties(hass):
+    """Test that native_* temperature properties match their deprecated aliases."""
+    proxy = create_proxy(hass)
+    proxy._temperature_unit = "°C"
+    proxy._virtual_target_temperature = 21.5
+
+    assert proxy.native_temperature_unit == "°C"
+    assert proxy.temperature_unit == proxy.native_temperature_unit
+
+    assert proxy.native_current_temperature == 20.0
+    assert proxy.current_temperature == proxy.native_current_temperature
+
+    assert proxy.native_target_temperature == 21.5
+    assert proxy.target_temperature == proxy.native_target_temperature
+
+    # Range mode targets
+    proxy._virtual_target_temperature_low = 19.0
+    proxy._virtual_target_temperature_high = 23.0
+    proxy._real_state = State(
+        "climate.real",
+        HVACMode.HEAT_COOL,
+        {
+            "current_temperature": 20.0,
+            "target_temp_high": 24.0,
+            "target_temp_low": 18.0,
+            "supported_features": ClimateEntityFeature.TARGET_TEMPERATURE_RANGE,
+        },
+    )
+    proxy._update_real_temperature_limits()
+
+    assert proxy.native_target_temperature is None
+    assert proxy.target_temperature is None
+    assert proxy.native_target_temperature_low == 19.0
+    assert proxy.target_temperature_low == proxy.native_target_temperature_low
+    assert proxy.native_target_temperature_high == 23.0
+    assert proxy.target_temperature_high == proxy.native_target_temperature_high
+
+
+@pytest.mark.asyncio
+async def test_discover_temperature_unit_and_reserved_attribute(hass):
+    """Test that temperature_unit is discovered from real thermostat state attributes and excluded from extra_state_attributes."""
+    proxy = create_proxy(hass)
+
+    # Real thermostat state has the new temperature_unit attribute (HA Core 2026.11+)
+    hass.states.async_set(
+        "climate.real",
+        HVACMode.HEAT,
+        {
+            "current_temperature": 68.0,
+            "temperature": 70.0,
+            "temperature_unit": "°F",
+        },
+    )
+    proxy._real_state = hass.states.get("climate.real")
+
+    # _discover_temperature_unit should pick up "temperature_unit"
+    assert proxy._discover_temperature_unit() == "°F"
+
+    # extra_state_attributes must NOT include "temperature_unit"
+    assert "temperature_unit" not in proxy.extra_state_attributes
+
+
+@pytest.mark.asyncio
+async def test_async_entity_id_changed(hass):
+    """Test that async_entity_id_changed executes without errors."""
+    proxy = create_proxy(hass)
+    proxy.entity_id = "climate.test_proxy_new"
+    # Should run without error whether or not super() implements it
+    proxy.async_entity_id_changed("climate.test_proxy_old")

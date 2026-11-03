@@ -1,20 +1,19 @@
 """Tests for the sensor_change_threshold (Smart Rate Limiter) feature."""
 
-from unittest.mock import AsyncMock, MagicMock
+import time
+from unittest.mock import MagicMock
+
 import pytest
 
-from homeassistant.core import HomeAssistant, State, CoreState
+from custom_components.thermostat_proxy.climate import CustomThermostatEntity
 from homeassistant.components.climate import (
+    ATTR_TEMPERATURE,
+    SERVICE_SET_TEMPERATURE,
     ClimateEntityFeature,
     HVACAction,
     HVACMode,
-    SERVICE_SET_TEMPERATURE,
-    ATTR_TEMPERATURE,
 )
-from custom_components.thermostat_proxy.climate import CustomThermostatEntity
-
-
-
+from homeassistant.core import HomeAssistant, State
 
 
 def create_proxy(
@@ -23,6 +22,7 @@ def create_proxy(
     sensors=None,
     sensor_change_threshold=0.5,
     target_temp_step=0.1,
+    cooldown_period=0,
 ):
     """Helper to create a configured CustomThermostatEntity."""
     if sensors is None:
@@ -38,7 +38,9 @@ def create_proxy(
         physical_sensor_name="Physical",
         use_last_active_sensor=False,
         sensor_change_threshold=sensor_change_threshold,
+        cooldown_period=cooldown_period,
     )
+    proxy.entity_id = "climate.test_proxy"
 
     real_attrs = {
         "current_temperature": 73.0,
@@ -134,3 +136,33 @@ async def test_sensor_change_threshold_zero_backward_compatibility(hass):
     count_2 = hass.services.async_call.call_count
     # Should NOT skip because threshold is 0.0
     assert count_2 > count_1
+
+
+@pytest.mark.asyncio
+async def test_sensor_change_threshold_skips_during_cooldown(
+    hass: HomeAssistant,
+) -> None:
+    """Test that sub-threshold sensor noise during cooldown does not schedule a retry timer."""
+    proxy = create_proxy(
+        hass,
+        sensor_change_threshold=0.5,
+        cooldown_period=60,
+    )
+    proxy._virtual_target_temperature = 75.0
+    proxy._last_acted_sensor_temp = 70.0
+    proxy._last_real_write_time = time.monotonic()
+
+    # Initial sensor state
+    hass.states.async_set("sensor.kids_room", "70.0")
+    proxy._sensor_states["sensor.kids_room"] = hass.states.get("sensor.kids_room")
+
+    await proxy._async_subscribe_to_states()
+
+    # Change sensor state within threshold (0.2 < 0.5)
+    hass.states.async_set("sensor.kids_room", "70.2")
+    await hass.async_block_till_done()
+
+    # Verify no cooldown retry timer was scheduled for sub-threshold noise
+    assert proxy._cooldown_timer_unsub is None
+
+    await proxy.async_will_remove_from_hass()
