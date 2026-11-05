@@ -282,3 +282,33 @@ async def test_realign_enforces_max_sync_offset_clamp(hass):
     assert args[2]["temperature"] in (62.0, 63.0)
     assert abs(args[2]["temperature"] - 72.5) <= 10.5
     assert args[2]["temperature"] not in (50.0, 45.0)
+
+
+def test_dual_target_wide_cool_setpoint_not_rejected_by_room_delta():
+    """Regression test for issue #70.
+
+    A cooling target far above room temperature should not be rejected when the
+    resulting physical setpoint is within max_sync_offset of the virtual target.
+
+    Scenario (from the bug report):
+      remote sensor (display_current) = 66.1 F
+      physical current (real_current)  = 65 F
+      requested cooling target         = 82 F
+      max_sync_offset                  = 10 F
+
+    Target-to-room delta = 82 - 66.1 = 15.9 -> previously raised ValueError.
+    Physical target = 65 + 15.9 = 80.9, which is only 1.1 F below virtual
+    target (82), well within max_sync_offset=10. No error should be raised.
+    """
+    proxy = create_proxy(None, max_sync_offset=10.0, real_min_temp=40.0, real_max_temp=90.0)
+
+    # Should not raise; physical-to-virtual offset is within max_sync_offset
+    virtual_temp, real_temp = proxy._calculate_dual_target_real_temperature(
+        requested_temp=82.0,
+        display_current=66.1,
+        real_current=65.0,
+    )
+    assert virtual_temp is not None
+    assert real_temp is not None
+    # Physical target should be near 80.9, within 10 F of virtual target 82
+    assert abs(real_temp - virtual_temp) <= 10.0
