@@ -1,4 +1,4 @@
-"""Tests simulating scenarios in GitHub issues #31, #32, and #65."""
+"""Tests simulating scenarios in GitHub issues #31, #32, #65, and #76."""
 
 import time
 from unittest.mock import MagicMock
@@ -358,3 +358,192 @@ async def test_issue_65_overdrive_disabled_when_offset_zero(hass):
     ]
     assert len(set_temp_calls) == 1
     assert set_temp_calls[0].args[2].get("temperature") == 21.5
+
+
+@pytest.mark.parametrize("state", [HVACMode.OFF, "unavailable", "unknown"])
+@pytest.mark.asyncio
+async def test_issue_76_skip_realign_when_physical_thermostat_off_or_unavailable(
+    hass, state
+):
+    """Test that target realignment is skipped while physical thermostat is off or unavailable."""
+    proxy = CustomThermostatEntity(
+        hass=hass,
+        name="Test Proxy",
+        real_thermostat="climate.real",
+        sensors=[{"name": "Remote", "entity_id": "sensor.remote"}],
+        default_sensor="Remote",
+        unique_id="123",
+        physical_sensor_name="Physical",
+        use_last_active_sensor=False,
+    )
+    proxy.entity_id = "climate.test_proxy"
+
+    # Set up climate.real in HEAT mode initially
+    hass.states.async_set(
+        "climate.real",
+        HVACMode.HEAT,
+        {
+            "current_temperature": 20.0,
+            "temperature": 20.0,
+            "target_temp_step": 0.5,
+            "hvac_action": "idle",
+            "supported_features": ClimateEntityFeature.TARGET_TEMPERATURE,
+        },
+    )
+    proxy._real_state = hass.states.get("climate.real")
+    proxy._update_real_temperature_limits()
+
+    proxy._temperature_unit = "°C"
+    proxy._sensor_states["sensor.remote"] = State("sensor.remote", "19.0")
+    proxy._sensor_precisions["sensor.remote"] = 0.1
+    proxy._selected_sensor_name = "Remote"
+    proxy._virtual_target_temperature = 22.0
+    proxy._target_temp_step = 0.5
+    proxy.async_write_ha_state = MagicMock()
+    proxy._last_acted_sensor_temp = None
+
+    # Verify cooldown callback is cancelled and cleared if pending when entering `state`
+    mock_cooldown_unsub = MagicMock()
+    proxy._cooldown_timer_unsub = mock_cooldown_unsub
+
+    # Transition climate.real from HVACMode.HEAT to `state` via _async_handle_real_state_event
+    old_state = proxy._real_state
+    new_attributes = (
+        {
+            "current_temperature": 20.0,
+            "temperature": 20.0,
+            "target_temp_step": 0.5,
+            "supported_features": ClimateEntityFeature.TARGET_TEMPERATURE,
+        }
+        if state not in ("unavailable", "unknown")
+        else {}
+    )
+    hass.states.async_set("climate.real", state, new_attributes)
+    new_state = hass.states.get("climate.real")
+
+    event = MagicMock()
+    event.data = {"old_state": old_state, "new_state": new_state}
+    proxy._async_handle_real_state_event(event)
+    await hass.async_block_till_done()
+
+    mock_cooldown_unsub.assert_called_once()
+    assert proxy._cooldown_timer_unsub is None
+
+    # Assert climate.set_temperature was NOT called
+    set_temp_calls = [
+        c
+        for c in hass.services.async_call.call_args_list
+        if c.args and len(c.args) >= 2 and c.args[1] == SERVICE_SET_TEMPERATURE
+    ]
+    assert len(set_temp_calls) == 0
+
+    # Trigger _async_realign_real_target_from_sensor for each trigger source
+    for trigger_source in ("sensor", "real", "preset"):
+        mock_unsub = MagicMock()
+        proxy._cooldown_timer_unsub = mock_unsub
+
+        await proxy._async_realign_real_target_from_sensor(
+            trigger_source=trigger_source
+        )
+
+        mock_unsub.assert_called_once()
+        assert proxy._cooldown_timer_unsub is None
+        assert proxy._last_acted_sensor_temp is None
+
+    # Verify realignment without pending cooldown also leaves timer None and skips write
+    await proxy._async_realign_real_target_from_sensor(trigger_source="sensor")
+    assert proxy._cooldown_timer_unsub is None
+    assert proxy._last_acted_sensor_temp is None
+
+    # Assert climate.set_temperature was NOT called throughout
+    set_temp_calls = [
+        c
+        for c in hass.services.async_call.call_args_list
+        if c.args and len(c.args) >= 2 and c.args[1] == SERVICE_SET_TEMPERATURE
+    ]
+    assert len(set_temp_calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_issue_76_realign_resumes_when_physical_thermostat_turns_on(hass):
+    """Test that target realignment resumes when physical thermostat turns back on."""
+    proxy = CustomThermostatEntity(
+        hass=hass,
+        name="Test Proxy",
+        real_thermostat="climate.real",
+        sensors=[{"name": "Remote", "entity_id": "sensor.remote"}],
+        default_sensor="Remote",
+        unique_id="123",
+        physical_sensor_name="Physical",
+        use_last_active_sensor=False,
+    )
+    proxy.entity_id = "climate.test_proxy"
+
+    # Start with climate.real in HVACMode.OFF, remote sensor 19.0°C, virtual target 22.0°C
+    hass.states.async_set(
+        "climate.real",
+        HVACMode.OFF,
+        {
+            "current_temperature": 20.0,
+            "temperature": 20.0,
+            "target_temp_step": 0.5,
+            "hvac_action": "off",
+            "supported_features": ClimateEntityFeature.TARGET_TEMPERATURE,
+        },
+    )
+    proxy._real_state = hass.states.get("climate.real")
+    proxy._update_real_temperature_limits()
+
+    proxy._temperature_unit = "°C"
+    proxy._sensor_states["sensor.remote"] = State("sensor.remote", "19.0")
+    proxy._sensor_precisions["sensor.remote"] = 0.1
+    proxy._selected_sensor_name = "Remote"
+    proxy._virtual_target_temperature = 22.0
+    proxy._target_temp_step = 0.5
+    proxy.async_write_ha_state = MagicMock()
+    hass.services.async_call.reset_mock()
+
+    # Simulate remote sensor changing to 18.5°C while off -> verify no set_temperature call is made
+    sensor_event = MagicMock()
+    sensor_event.data = {
+        "entity_id": "sensor.remote",
+        "new_state": State("sensor.remote", "18.5"),
+    }
+    proxy._async_handle_sensor_state_event(sensor_event)
+    await hass.async_block_till_done()
+
+    set_temp_calls = [
+        c
+        for c in hass.services.async_call.call_args_list
+        if c.args and len(c.args) >= 2 and c.args[1] == SERVICE_SET_TEMPERATURE
+    ]
+    assert len(set_temp_calls) == 0
+
+    # Transition climate.real from HVACMode.OFF to HVACMode.HEAT (current_temperature=20.0, temperature=20.0)
+    old_state = proxy._real_state
+    new_attrs = {
+        "current_temperature": 20.0,
+        "temperature": 20.0,
+        "target_temp_step": 0.5,
+        "hvac_action": "idle",
+        "supported_features": ClimateEntityFeature.TARGET_TEMPERATURE,
+    }
+    hass.states.async_set("climate.real", HVACMode.HEAT, new_attrs)
+    new_state = hass.states.get("climate.real")
+
+    event = MagicMock()
+    event.data = {"old_state": old_state, "new_state": new_state}
+    proxy._async_handle_real_state_event(event)
+    await hass.async_block_till_done()
+
+    # Verify that automatic target realignment now fires and calls climate.set_temperature with expected offset target
+    # Remote sensor 18.5°C, virtual target 22.0°C -> delta +3.5°C
+    # Real current 20.0°C + delta 3.5°C = 23.5°C + 1.0°C overdrive = 24.5°C
+    set_temp_calls = [
+        c
+        for c in hass.services.async_call.call_args_list
+        if c.args and len(c.args) >= 2 and c.args[1] == SERVICE_SET_TEMPERATURE
+    ]
+    assert len(set_temp_calls) == 1
+    assert set_temp_calls[0].args[2].get("temperature") == 24.5
+    assert proxy._last_real_target_temp == 24.5
