@@ -663,6 +663,10 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
         self._temperature_unit = self._discover_temperature_unit()
         real_target = self._get_real_target_temperature()
+        if self._virtual_target_temperature is None and real_target is not None:
+            self._virtual_target_temperature = self._apply_target_constraints(
+                real_target
+            )
 
         # Check if the device just became available, switched from Off, or changed HVAC mode
         was_not_controlling = old_state is None or old_state.state in (
@@ -769,7 +773,12 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 real_target_low, real_target_high, skip_external_change
             )
 
-        self._schedule_target_realign(trigger_source="real")
+        if new_state.state in (HVACMode.OFF, STATE_UNAVAILABLE, STATE_UNKNOWN):
+            if self._cooldown_timer_unsub:
+                self._cooldown_timer_unsub()
+                self._cooldown_timer_unsub = None
+        else:
+            self._schedule_target_realign(trigger_source="real")
         self.async_write_ha_state()
 
     @callback
@@ -2589,6 +2598,21 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             )
             if self._virtual_target_temperature is None:
                 return
+
+        if (
+            self.hvac_mode in (HVACMode.OFF, None)
+            or not self._real_state
+            or self._real_state.state
+            in (HVACMode.OFF, STATE_UNAVAILABLE, STATE_UNKNOWN)
+        ):
+            if self._cooldown_timer_unsub:
+                self._cooldown_timer_unsub()
+                self._cooldown_timer_unsub = None
+            self._log_debug(
+                "Skipping target realignment because physical thermostat is off or unavailable (state=%s)",
+                self._real_state.state if self._real_state else None,
+            )
+            return
 
         if trigger_source == "sensor":
             active_sensor_temp = self._get_active_sensor_temperature()
