@@ -25,6 +25,7 @@ from .const import (
     CONF_OVERDRIVE_OFFSET,
     CONF_PHYSICAL_SENSOR_NAME,
     CONF_PHYSICAL_TARGET_CHANGE_BEHAVIOR,
+    CONF_PHYSICAL_TEMPERATURE_SENSOR,
     CONF_PRESERVE_VIRTUAL_TARGET,
     CONF_SENSOR_CHANGE_THRESHOLD,
     CONF_SENSOR_ENTITY_ID,
@@ -185,6 +186,7 @@ def _sync_reconfigure_options(
     """Sync shared reconfigure parameters into entry options to prevent stale options overriding."""
     options = dict(entry.options)
     for key in (
+        CONF_PHYSICAL_TEMPERATURE_SENSOR,
         CONF_DEFAULT_SENSOR,
         CONF_COOLDOWN_PERIOD,
         CONF_MIN_TEMP,
@@ -238,6 +240,9 @@ def _parse_and_validate_runtime_input(
             data[CONF_DEFAULT_SENSOR] = default_sensor
         data[CONF_USE_LAST_ACTIVE_SENSOR] = False
 
+    data[CONF_PHYSICAL_TEMPERATURE_SENSOR] = (
+        user_input.get(CONF_PHYSICAL_TEMPERATURE_SENSOR) or None
+    )
     data[CONF_COOLDOWN_PERIOD] = user_input.get(
         CONF_COOLDOWN_PERIOD, DEFAULT_COOLDOWN_PERIOD
     )
@@ -443,6 +448,17 @@ def _build_runtime_settings_schema(
             selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
         )
 
+    schema_fields[
+        vol.Optional(
+            CONF_PHYSICAL_TEMPERATURE_SENSOR,
+            description={
+                "suggested_value": settings.get(CONF_PHYSICAL_TEMPERATURE_SENSOR)
+            },
+        )
+    ] = selector.EntitySelector(
+        selector.EntitySelectorConfig(domain=["sensor"], device_class="temperature")
+    )
+
     default_sensor_field = _build_default_sensor_field(
         default_sensor_options, default_sensor_value
     )
@@ -505,6 +521,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._sensors: list[dict[str, str]] = []
         self._default_sensor: str | None = None
         self._physical_sensor_name: str = PHYSICAL_SENSOR_NAME
+        self._physical_temperature_sensor: str | None = None
         self._use_last_active_sensor: bool = False
         self._cooldown_period: int = DEFAULT_COOLDOWN_PERIOD
         self._min_temp: float | None = None
@@ -584,6 +601,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             CONF_PHYSICAL_SENSOR_NAME, PHYSICAL_SENSOR_NAME
         )
         settings = _extract_entry_runtime_settings(entry)
+        self._physical_temperature_sensor = settings[CONF_PHYSICAL_TEMPERATURE_SENSOR]
         self._default_sensor = settings[CONF_DEFAULT_SENSOR]
         self._use_last_active_sensor = settings[CONF_USE_LAST_ACTIVE_SENSOR]
         self._cooldown_period = settings[CONF_COOLDOWN_PERIOD]
@@ -895,6 +913,9 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         else runtime_data.get(CONF_DEFAULT_SENSOR)
                     )
                     self._physical_sensor_name = physical_sensor_name
+                    self._physical_temperature_sensor = runtime_data[
+                        CONF_PHYSICAL_TEMPERATURE_SENSOR
+                    ]
                     self._cooldown_period = runtime_data[CONF_COOLDOWN_PERIOD]
                     self._min_temp = runtime_data[CONF_MIN_TEMP]
                     self._max_temp = runtime_data[CONF_MAX_TEMP]
@@ -944,6 +965,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     )
 
         current_settings = {
+            CONF_PHYSICAL_TEMPERATURE_SENSOR: self._physical_temperature_sensor,
             CONF_COOLDOWN_PERIOD: self._cooldown_period,
             CONF_MIN_TEMP: self._min_temp,
             CONF_MAX_TEMP: self._max_temp,

@@ -42,6 +42,7 @@ A Home Assistant custom integration that lets you expose a virtual `climate` ent
 | `sensors` | Yes | | List of sensor definitions (`name`, `entity_id`, and optional `humidity_entity_id`). |
 | `default_sensor` | No | | The preset name of the default temperature sensor to activate on startup, or `"__thermostat_proxy_last_active__"` to resume the last active sensor. |
 | `use_last_active_sensor` | No | `False` | Resume with the most recently selected sensor preset across restarts instead of a fixed default. |
+| `physical_temperature_sensor` | No | | Optional temperature sensor at the wrapped thermostat’s own location. Used as the physical reference for all presets and offsets, with Celsius/Fahrenheit conversion. Falls back to the climate reading if missing or invalid. This is not a remote room sensor. |
 | `physical_sensor_name` | No | `Physical Entity` | The name of the preset representing the physical thermostat itself. |
 | `cooldown_period` | No | `0` (Disabled) | **Minimum Adjustment Interval**: Minimum time (in seconds) between automatic updates to the physical thermostat. Useful for preventing rapid cycling with noisy sensors. Retries automatically when cooldown expires. |
 | `min_temp` | No | `0` (Disabled) | **Minimum Safe Temperature Limit**: Calculated targets sent to the physical thermostat will not go below this value. Set to 0 to disable. |

@@ -20,6 +20,7 @@ from .const import (
     CONF_OVERDRIVE_OFFSET,
     CONF_PHYSICAL_SENSOR_NAME,
     CONF_PHYSICAL_TARGET_CHANGE_BEHAVIOR,
+    CONF_PHYSICAL_TEMPERATURE_SENSOR,
     CONF_PRESERVE_VIRTUAL_TARGET,
     CONF_SENSOR_CHANGE_THRESHOLD,
     CONF_USE_LAST_ACTIVE_SENSOR,
@@ -45,6 +46,7 @@ class EntityConfig(TypedDict):
     """Typed dictionary representing resolved entity configuration kwargs."""
 
     physical_sensor_name: str
+    physical_temperature_sensor: str | None
     default_sensor: str | None
     use_last_active_sensor: bool
     disable_auto_switch: bool
@@ -115,6 +117,7 @@ def extract_runtime_settings(config: Mapping[str, Any]) -> dict[str, Any]:
     max_sync_offset = _nonzero_float_or_none(raw_max_sync_offset)
 
     return {
+        CONF_PHYSICAL_TEMPERATURE_SENSOR: config.get(CONF_PHYSICAL_TEMPERATURE_SENSOR),
         CONF_DEFAULT_SENSOR: default_sensor,
         CONF_USE_LAST_ACTIVE_SENSOR: use_last_active_sensor,
         CONF_COOLDOWN_PERIOD: config.get(CONF_COOLDOWN_PERIOD, DEFAULT_COOLDOWN_PERIOD),
@@ -169,6 +172,7 @@ def extract_entity_config(
 
     return {
         "physical_sensor_name": resolved_physical_name,
+        "physical_temperature_sensor": settings[CONF_PHYSICAL_TEMPERATURE_SENSOR],
         "default_sensor": default_sensor,
         "use_last_active_sensor": settings[CONF_USE_LAST_ACTIVE_SENSOR],
         "disable_auto_switch": settings[CONF_DISABLE_AUTO_SWITCH],
