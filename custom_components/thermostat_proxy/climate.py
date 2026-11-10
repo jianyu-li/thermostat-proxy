@@ -683,7 +683,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         )
 
         if real_target is not None:
-            previous_real_target = self._last_real_target_temp
+            # Compare reported state transitions, not an optimistic command value.
+            previous_real_target = old_real_target
             self._last_real_target_temp = real_target
             strict_tolerance = self._pending_request_tolerance()
 
@@ -2517,11 +2518,15 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                         sensor_temp + tolerance
                     )
 
-                not_heating = real_action != HVACAction.HEATING
+                heating_is_idle = real_action == HVACAction.IDLE
+                heating_is_active = real_action == HVACAction.HEATING
                 if (
                     self._overdrive_offset > 0
                     and want_heat
-                    and (not_heating or self._active_overdrive_heat)
+                    and (
+                        heating_is_idle
+                        or (heating_is_active and self._active_overdrive_heat)
+                    )
                 ):
                     self._active_overdrive_heat = True
                     overdrive_active = True
