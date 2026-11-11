@@ -217,6 +217,7 @@ def _parse_and_validate_runtime_input(
     available_default_options: list[str | None],
     fallback_disable_auto_switch: bool,
     fallback_preserve_virtual_target: bool,
+    remote_sensor_entity_ids: set[str] | list[str] | None = None,
 ) -> tuple[dict[str, Any], str | None]:
     """Parse and validate submitted runtime settings."""
     default_sensor = user_input.get(CONF_DEFAULT_SENSOR)
@@ -231,6 +232,14 @@ def _parse_and_validate_runtime_input(
     if min_temp is not None and max_temp is not None and min_temp >= max_temp:
         return {}, "invalid_temp_range"
 
+    physical_temp_sensor = user_input.get(CONF_PHYSICAL_TEMPERATURE_SENSOR) or None
+    if (
+        physical_temp_sensor
+        and remote_sensor_entity_ids
+        and physical_temp_sensor in remote_sensor_entity_ids
+    ):
+        return {}, "duplicate_sensor_entity"
+
     data: dict[str, Any] = {}
     if default_sensor == DEFAULT_SENSOR_LAST_ACTIVE:
         data[CONF_DEFAULT_SENSOR] = DEFAULT_SENSOR_LAST_ACTIVE
@@ -240,9 +249,7 @@ def _parse_and_validate_runtime_input(
             data[CONF_DEFAULT_SENSOR] = default_sensor
         data[CONF_USE_LAST_ACTIVE_SENSOR] = False
 
-    data[CONF_PHYSICAL_TEMPERATURE_SENSOR] = (
-        user_input.get(CONF_PHYSICAL_TEMPERATURE_SENSOR) or None
-    )
+    data[CONF_PHYSICAL_TEMPERATURE_SENSOR] = physical_temp_sensor
     data[CONF_COOLDOWN_PERIOD] = user_input.get(
         CONF_COOLDOWN_PERIOD, DEFAULT_COOLDOWN_PERIOD
     )
@@ -873,6 +880,11 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors["base"] = "no_sensors"
 
         sensor_names = [sensor[CONF_SENSOR_NAME] for sensor in self._sensors]
+        remote_entity_ids = [
+            s[CONF_SENSOR_ENTITY_ID]
+            for s in self._sensors
+            if s.get(CONF_SENSOR_ENTITY_ID)
+        ]
         current_physical_name = self._physical_sensor_name
         available_default_options = list(sensor_names)
         if current_physical_name not in available_default_options:
@@ -897,6 +909,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     available_default_options,
                     self._disable_auto_switch,
                     self._preserve_virtual_target,
+                    remote_sensor_entity_ids=remote_entity_ids,
                 )
                 if error:
                     errors["base"] = error
@@ -1034,6 +1047,9 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
     async def async_step_init(self, user_input: dict[str, Any] | None = None):
         sensors = self.config_entry.data.get(CONF_SENSORS, [])
         sensor_names = [sensor[CONF_SENSOR_NAME] for sensor in sensors]
+        remote_entity_ids = [
+            s[CONF_SENSOR_ENTITY_ID] for s in sensors if s.get(CONF_SENSOR_ENTITY_ID)
+        ]
         physical_sensor_name = self.config_entry.data.get(
             CONF_PHYSICAL_SENSOR_NAME, PHYSICAL_SENSOR_NAME
         )
@@ -1051,6 +1067,7 @@ class CustomThermostatOptionsFlowHandler(config_entries.OptionsFlow):
                 sensor_names,
                 settings[CONF_DISABLE_AUTO_SWITCH],
                 settings[CONF_PRESERVE_VIRTUAL_TARGET],
+                remote_sensor_entity_ids=remote_entity_ids,
             )
             if error:
                 errors["base"] = error

@@ -188,3 +188,72 @@ def test_reconfigure_updates_existing_option():
         entry, {CONF_PHYSICAL_TEMPERATURE_SENSOR: "sensor.new"}
     )
     assert updated[CONF_PHYSICAL_TEMPERATURE_SENSOR] == "sensor.new"
+
+
+@pytest.mark.asyncio
+async def test_physical_temperature_sensor_health_and_unavailable_entities(hass):
+    proxy = create_proxy(hass)
+    hass.states.async_set("sensor.physical", "unavailable")
+    assert proxy._get_real_current_temperature() == 71.0
+    assert proxy._entity_health.get("sensor.physical") is False
+    assert "sensor.physical" in proxy.extra_state_attributes["unavailable_entities"]
+
+    hass.states.async_set("sensor.physical", "70.52", {"unit_of_measurement": "°F"})
+    assert proxy._get_real_current_temperature() == 70.52
+    assert proxy._entity_health.get("sensor.physical") is True
+    assert "sensor.physical" not in proxy.extra_state_attributes["unavailable_entities"]
+
+
+@pytest.mark.asyncio
+async def test_physical_preset_display_precision_with_physical_temperature_sensor(hass):
+    proxy = create_proxy(hass)
+    proxy._real_state = State(
+        "climate.real",
+        HVACMode.HEAT,
+        {
+            "current_temperature": 71.0,
+            "temperature": 70.0,
+            "temperature_unit": "°F",
+            "target_temp_step": 1.0,
+        },
+    )
+    proxy._update_real_temperature_limits()
+    hass.states.async_set("sensor.physical", "70.52", {"unit_of_measurement": "°F"})
+    proxy._get_real_current_temperature()
+    proxy._selected_sensor_name = "Physical"
+    assert proxy.precision == 0.1
+    assert proxy.target_temperature_step == 1.0
+
+
+@pytest.mark.asyncio
+async def test_physical_preset_respects_sensor_change_threshold_on_physical_sensor_events(
+    hass,
+):
+    proxy = create_proxy(hass)
+    proxy._selected_sensor_name = "Physical"
+    await proxy._async_subscribe_to_states()
+    hass.states.async_set("sensor.physical", "70.52", {"unit_of_measurement": "°F"})
+    await hass.async_block_till_done()
+    proxy._schedule_target_realign.assert_called_once_with(trigger_source="sensor")
+    await proxy.async_will_remove_from_hass()
+
+
+@pytest.mark.asyncio
+async def test_options_rejects_remote_sensor_as_physical_temperature_sensor(hass):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            "name": "Proxy",
+            "thermostat": "climate.real",
+            "sensors": [{"name": "Remote", "entity_id": "sensor.remote"}],
+        },
+    )
+    entry.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert result["type"] == FlowResultType.FORM
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        user_input={CONF_PHYSICAL_TEMPERATURE_SENSOR: "sensor.remote"},
+    )
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {"base": "duplicate_sensor_entity"}
