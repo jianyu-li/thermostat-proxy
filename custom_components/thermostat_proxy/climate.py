@@ -684,7 +684,11 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
         if real_target is not None:
             # Compare reported state transitions, not an optimistic command value.
-            previous_real_target = old_real_target
+            previous_real_target = (
+                old_real_target
+                if old_real_target is not None
+                else self._last_real_target_temp
+            )
             self._last_real_target_temp = real_target
             strict_tolerance = self._pending_request_tolerance()
 
@@ -767,11 +771,25 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 self._log_debug("Initial real target captured: %s", real_target)
 
         # Track dual setpoint changes on the physical thermostat
+        old_real_low = (
+            _coerce_temperature(old_state.attributes.get(ATTR_TARGET_TEMP_LOW))
+            if old_state
+            else None
+        )
+        old_real_high = (
+            _coerce_temperature(old_state.attributes.get(ATTR_TARGET_TEMP_HIGH))
+            if old_state
+            else None
+        )
         real_target_low = self._get_real_target_temperature_low()
         real_target_high = self._get_real_target_temperature_high()
         if real_target_low is not None or real_target_high is not None:
             self._detect_external_dual_target_change(
-                real_target_low, real_target_high, skip_external_change
+                real_target_low,
+                real_target_high,
+                skip_external_change,
+                old_real_low=old_real_low,
+                old_real_high=old_real_high,
             )
 
         if new_state.state in (HVACMode.OFF, STATE_UNAVAILABLE, STATE_UNKNOWN):
@@ -997,11 +1015,21 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         real_low: float | None,
         real_high: float | None,
         was_not_controlling: bool,
+        old_real_low: float | None = None,
+        old_real_high: float | None = None,
     ) -> None:
         """Detect and react to external changes to dual setpoint targets."""
 
-        previous_low = self._last_real_target_temp_low
-        previous_high = self._last_real_target_temp_high
+        previous_low = (
+            old_real_low
+            if old_real_low is not None
+            else self._last_real_target_temp_low
+        )
+        previous_high = (
+            old_real_high
+            if old_real_high is not None
+            else self._last_real_target_temp_high
+        )
 
         if real_low is not None:
             self._last_real_target_temp_low = real_low
@@ -1093,7 +1121,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 commanded_val=self._last_commanded_real_target_low,
                 snapped_val=self._last_snapped_real_target_low,
                 previous_val=previous_low,
-                old_val=None,
+                old_val=old_real_low,
                 loose_tolerance=loose_tolerance,
                 abs_tol=abs_tol,
             )
@@ -1114,7 +1142,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 commanded_val=self._last_commanded_real_target_high,
                 snapped_val=self._last_snapped_real_target_high,
                 previous_val=previous_high,
-                old_val=None,
+                old_val=old_real_high,
                 loose_tolerance=loose_tolerance,
                 abs_tol=abs_tol,
             )
@@ -1399,7 +1427,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self,
         reference_temp: float | None,
         sensor_temp: float | None,
-        not_cooling: bool,
+        real_action: str | None,
     ) -> float:
         """Evaluate humidity overdrive and return the cooling offset to apply.
 
@@ -1437,10 +1465,16 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             sensor_temp > min_overcool_target if sensor_temp is not None else False
         )
 
+        cooling_is_idle = real_action == HVACAction.IDLE
+        cooling_is_active = real_action == HVACAction.COOLING
+
         if (
             want_dehum
             and can_overcool
-            and (not_cooling or self._active_overdrive_humidity)
+            and (
+                cooling_is_idle
+                or (cooling_is_active and self._active_overdrive_humidity)
+            )
         ):
             was_active = self._active_overdrive_humidity
             self._active_overdrive_humidity = True
@@ -2551,11 +2585,15 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                         sensor_temp - tolerance
                     )
 
-                not_cooling = real_action != HVACAction.COOLING
+                cooling_is_idle = real_action == HVACAction.IDLE
+                cooling_is_active = real_action == HVACAction.COOLING
                 if (
                     self._overdrive_offset > 0
                     and want_cool
-                    and (not_cooling or self._active_overdrive_cool)
+                    and (
+                        cooling_is_idle
+                        or (cooling_is_active and self._active_overdrive_cool)
+                    )
                 ):
                     self._active_overdrive_cool = True
                     overdrive_active = True
@@ -2573,7 +2611,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     humidity_adjust = self._evaluate_humidity_overdrive(
                         self._virtual_target_temperature,
                         sensor_temp,
-                        not_cooling,
+                        real_action,
                     )
                     if humidity_adjust != 0.0:
                         overdrive_active = True
@@ -2864,6 +2902,11 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             tolerance = max(self.precision or DEFAULT_PRECISION, 0.1)
             deadband = max(tolerance, self._sensor_change_threshold)
 
+            heating_is_idle = real_action == HVACAction.IDLE
+            heating_is_active = real_action == HVACAction.HEATING
+            cooling_is_idle = real_action == HVACAction.IDLE
+            cooling_is_active = real_action == HVACAction.COOLING
+
             if (
                 self._virtual_target_temperature_low is not None
                 and calculated_real_low is not None
@@ -2877,8 +2920,10 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                         self._virtual_target_temperature_low - tolerance
                     )
 
-                not_heating = real_action != HVACAction.HEATING
-                if want_heat and (not_heating or self._active_overdrive_heat):
+                if want_heat and (
+                    heating_is_idle
+                    or (heating_is_active and self._active_overdrive_heat)
+                ):
                     self._active_overdrive_heat = True
                     overdrive_adjust_low = self._overdrive_offset
                     _LOGGER.info(
@@ -2901,8 +2946,10 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                         self._virtual_target_temperature_high + tolerance
                     )
 
-                not_cooling = real_action != HVACAction.COOLING
-                if want_cool and (not_cooling or self._active_overdrive_cool):
+                if want_cool and (
+                    cooling_is_idle
+                    or (cooling_is_active and self._active_overdrive_cool)
+                ):
                     self._active_overdrive_cool = True
                     overdrive_adjust_high = -self._overdrive_offset
                     _LOGGER.info(
