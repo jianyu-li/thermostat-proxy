@@ -44,6 +44,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     ATTR_ENTITY_ID,
     ATTR_TEMPERATURE,
+    ATTR_UNIT_OF_MEASUREMENT,
     CONF_NAME,
     PRECISION_TENTHS,
     PRECISION_WHOLE,
@@ -57,6 +58,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_call_later, async_track_state_change_event
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
+from homeassistant.util.unit_conversion import TemperatureConverter
 
 from .const import (
     ATTR_ACTIVE_HUMIDITY_SENSOR,
@@ -81,6 +83,7 @@ from .const import (
     CONF_OVERDRIVE_OFFSET,
     CONF_PHYSICAL_SENSOR_NAME,
     CONF_PHYSICAL_TARGET_CHANGE_BEHAVIOR,
+    CONF_PHYSICAL_TEMPERATURE_SENSOR,
     CONF_PRESERVE_VIRTUAL_TARGET,
     CONF_SENSOR_CHANGE_THRESHOLD,
     CONF_SENSOR_ENTITY_ID,
@@ -187,6 +190,9 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
         vol.Optional(CONF_UNIQUE_ID): cv.string,
         vol.Optional(CONF_DEFAULT_SENSOR): cv.string,
         vol.Optional(CONF_PHYSICAL_SENSOR_NAME): cv.string,
+        vol.Optional(CONF_PHYSICAL_TEMPERATURE_SENSOR): vol.Any(
+            cv.entity_domain("sensor"), None
+        ),
         vol.Optional(CONF_USE_LAST_ACTIVE_SENSOR, default=False): cv.boolean,
         vol.Optional(CONF_COOLDOWN_PERIOD, default=DEFAULT_COOLDOWN_PERIOD): vol.All(
             cv.time_period, cv.positive_timedelta
@@ -329,6 +335,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         default_target_humidity: int = DEFAULT_TARGET_HUMIDITY,
         min_dual_temp_spread: float | None = None,
         overdrive_offset: float = DEFAULT_OVERDRIVE_OFFSET,
+        physical_temperature_sensor: str | None = None,
     ) -> None:
         self.hass = hass
         if isinstance(cooldown_period, (int, float)):
@@ -339,6 +346,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self._attr_name = name
         self._attr_unique_id = unique_id
         self._real_entity_id = real_thermostat
+        self._physical_temperature_sensor_entity_id = physical_temperature_sensor
         self._physical_sensor_name = physical_sensor_name or PHYSICAL_SENSOR_NAME
         base_sensors: list[SensorConfig] = [
             SensorConfig(
@@ -450,6 +458,14 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     self.hass.states.get(sensor.humidity_entity_id)
                 )
         self._temperature_unit = self._discover_temperature_unit()
+        if self._physical_temperature_sensor_entity_id:
+            phys_state = self.hass.states.get(
+                self._physical_temperature_sensor_entity_id
+            )
+            self._sensor_precisions[self._physical_temperature_sensor_entity_id] = (
+                self._infer_sensor_precision(phys_state)
+            )
+            self._get_real_current_temperature()
         if self._last_real_target_temp is None:
             self._last_real_target_temp = self._get_real_target_temperature()
         if self._last_real_target_temp_low is None:
@@ -494,6 +510,15 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 self._async_handle_real_state_event,
             )
         )
+
+        if self._physical_temperature_sensor_entity_id:
+            self._unsub_listeners.append(
+                async_track_state_change_event(
+                    self.hass,
+                    [self._physical_temperature_sensor_entity_id],
+                    self._async_handle_physical_temperature_event,
+                )
+            )
 
         sensor_entity_ids = [
             sensor.entity_id
@@ -798,6 +823,18 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 self._cooldown_timer_unsub = None
         else:
             self._schedule_target_realign(trigger_source="real")
+        self.async_write_ha_state()
+
+    @callback
+    def _async_handle_physical_temperature_event(self, event) -> None:
+        """Realign measurements without treating them as setpoint changes."""
+        new_state: State | None = event.data.get("new_state")
+        if self._physical_temperature_sensor_entity_id:
+            self._sensor_precisions[self._physical_temperature_sensor_entity_id] = (
+                self._infer_sensor_precision(new_state)
+            )
+        trigger = "sensor" if self._is_physical_sensor_preset_selected() else "real"
+        self._schedule_target_realign(trigger_source=trigger)
         self.async_write_ha_state()
 
     @callback
@@ -1321,7 +1358,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         if self._real_state:
             if unit := self._real_state.attributes.get("temperature_unit"):
                 return unit
-            if unit := self._real_state.attributes.get("unit_of_measurement"):
+            if unit := self._real_state.attributes.get(ATTR_UNIT_OF_MEASUREMENT):
                 return unit
         return self.hass.config.units.temperature_unit or UnitOfTemperature.CELSIUS
 
@@ -1335,6 +1372,34 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         value = _coerce_temperature(
             self._real_state.attributes.get(ATTR_CURRENT_TEMPERATURE)
         )
+        if self._physical_temperature_sensor_entity_id:
+            sensor = self.hass.states.get(self._physical_temperature_sensor_entity_id)
+            raw_value = _coerce_temperature(sensor.state) if sensor else None
+            unit = sensor.attributes.get(ATTR_UNIT_OF_MEASUREMENT) if sensor else None
+            valid_units = (UnitOfTemperature.CELSIUS, UnitOfTemperature.FAHRENHEIT)
+            if (
+                raw_value is not None
+                and math.isfinite(raw_value)
+                and unit in valid_units
+                and self.native_temperature_unit in valid_units
+            ):
+                self._mark_entity_health(
+                    self._physical_temperature_sensor_entity_id, True
+                )
+                if (
+                    self._physical_temperature_sensor_entity_id
+                    not in self._sensor_precisions
+                ):
+                    self._sensor_precisions[
+                        self._physical_temperature_sensor_entity_id
+                    ] = self._infer_sensor_precision(sensor)
+                value = TemperatureConverter.convert(
+                    raw_value, unit, self.native_temperature_unit
+                )
+            else:
+                self._mark_entity_health(
+                    self._physical_temperature_sensor_entity_id, False
+                )
         if value is not None:
             humidity = self._real_state.attributes.get(ATTR_CURRENT_HUMIDITY)
             is_uninitialized_temp = (
@@ -1597,7 +1662,13 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         """
         base = self._target_temp_step or self._precision_override or super().precision
         sensor = self._sensor_lookup.get(self._selected_sensor_name)
-        if sensor and not sensor.is_physical:
+        if sensor and (
+            not sensor.is_physical
+            or (
+                self._physical_temperature_sensor_entity_id
+                and self._entity_health.get(self._physical_temperature_sensor_entity_id)
+            )
+        ):
             sensor_precision = self._get_active_sensor_display_precision()
             if base is not None:
                 return min(base, sensor_precision)
@@ -1607,7 +1678,14 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
     def _get_active_sensor_precision(self) -> float:
         """Return the active sensor's inferred precision, or DEFAULT_PRECISION."""
         sensor = self._sensor_lookup.get(self._selected_sensor_name)
-        if not sensor or sensor.is_physical:
+        if not sensor:
+            return 0
+        if sensor.is_physical:
+            if self._physical_temperature_sensor_entity_id:
+                return self._sensor_precisions.get(
+                    self._physical_temperature_sensor_entity_id,
+                    DEFAULT_PRECISION,
+                )
             return 0
         return self._sensor_precisions.get(sensor.entity_id, DEFAULT_PRECISION)
 

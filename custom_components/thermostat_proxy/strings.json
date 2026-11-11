@@ -104,7 +104,8 @@
           "overdrive_offset": "Temperature overdrive offset",
           "physical_sensor_name": "Physical thermostat preset name",
           "physical_target_change_behavior": "Physical target change behavior",
-          "sensor_change_threshold": "Sensor change threshold"
+          "sensor_change_threshold": "Sensor change threshold",
+          "physical_temperature_sensor": "Physical temperature sensor (optional)"
         },
         "data_description": {
           "cooldown_period": "Minimum wait time between setpoint adjustments sent to the physical thermostat to prevent short-cycling. Set to 0 to disable.",
@@ -118,7 +119,8 @@
           "overdrive_offset": "Extra degree offset applied to force the physical thermostat to run when the remote sensor is not satisfied but the thermostat is idle. Set to 0 to disable (default 1.0°).",
           "physical_sensor_name": "Preset name for the physical thermostat's internal temperature sensor (defaults to 'Physical Entity').",
           "physical_target_change_behavior": "How the proxy responds when setpoints are changed directly on the physical thermostat hardware (e.g., turning the physical dial).",
-          "sensor_change_threshold": "Minimum temperature change required at the active sensor before updating the physical thermostat. Filters out noise and frequent micro-adjustments. Set to 0 to disable."
+          "sensor_change_threshold": "Minimum temperature change required at the active sensor before updating the physical thermostat. Filters out noise and frequent micro-adjustments. Set to 0 to disable.",
+          "physical_temperature_sensor": "Select a temperature sensor for the wrapped thermostat’s own location when its climate reading is rounded. Uses the thermostat reading if unavailable. Leave empty to use the climate reading."
         }
       }
     },
@@ -152,7 +154,8 @@
           "min_temp": "Minimum safe temperature",
           "overdrive_offset": "Temperature overdrive offset",
           "physical_target_change_behavior": "Physical target change behavior",
-          "sensor_change_threshold": "Sensor change threshold"
+          "sensor_change_threshold": "Sensor change threshold",
+          "physical_temperature_sensor": "Physical temperature sensor (optional)"
         },
         "data_description": {
           "cooldown_period": "Minimum wait time between setpoint adjustments sent to the physical thermostat to prevent short-cycling. Set to 0 to disable.",
@@ -165,11 +168,13 @@
           "min_temp": "Lowest allowable target temperature (safety floor). Any target below this is clamped. Set to 0 to disable.",
           "overdrive_offset": "Extra degree offset applied to force the physical thermostat to run when the remote sensor is not satisfied but the thermostat is idle. Set to 0 to disable (default 1.0°).",
           "physical_target_change_behavior": "How the proxy responds when setpoints are changed directly on the physical thermostat hardware (e.g., turning the physical dial).",
-          "sensor_change_threshold": "Minimum temperature change required at the active sensor before updating the physical thermostat. Filters out noise and frequent micro-adjustments. Set to 0 to disable."
+          "sensor_change_threshold": "Minimum temperature change required at the active sensor before updating the physical thermostat. Filters out noise and frequent micro-adjustments. Set to 0 to disable.",
+          "physical_temperature_sensor": "Select a temperature sensor for the wrapped thermostat’s own location when its climate reading is rounded. Uses the thermostat reading if unavailable. Leave empty to use the climate reading."
         }
       }
     },
     "error": {
+      "duplicate_sensor_entity": "Each entity can only be used once.",
       "invalid_default_sensor": "Select a sensor from the list.",
       "invalid_temp_range": "Minimum temperature must be less than maximum temperature."
     }
