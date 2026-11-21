@@ -2091,42 +2091,46 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
             display_current = self.native_current_temperature
             real_current = self._get_real_current_temperature()
-            if display_current is None or real_current is None:
-                _LOGGER.warning(
-                    "Cannot compute temperature delta for %s because sensor or thermostat is missing",
-                    self.entity_id,
+            if self._is_physical_sensor_preset_selected():
+                real_target = self._apply_safety_clamp(
+                    constrained_target, reference_target=constrained_target
                 )
-                return
-
-            delta = constrained_target - display_current
-            if self._max_sync_offset and abs(delta) > self._max_sync_offset:
-                raise ValueError(
-                    f"Requested target {constrained_target} requires an offset of {abs(delta)}°, "
-                    f"which exceeds the configured max_sync_offset ({self._max_sync_offset}°)."
-                )
-            calculated_real_target = real_current + delta
-            real_target = self._apply_safety_clamp(
-                calculated_real_target, reference_target=constrained_target
-            )
-            if real_target is None:
-                _LOGGER.warning(
-                    "Cannot set temperature for %s: safety clamp returned None",
-                    self.entity_id,
-                )
-                return
-            real_target = self._apply_target_constraints(real_target)
-            if (
-                not self._is_physical_sensor_preset_selected()
-                and real_target is not None
-            ):
-                target_mode = kwargs.get(ATTR_HVAC_MODE) or self.hvac_mode
-                if target_mode in (HVACMode.COOL, HVACMode.HEAT):
-                    real_target = self._prevent_satisfied_rounding_crossover(
-                        desired_real=real_target,
-                        calculated_real=calculated_real_target,
-                        real_current=real_current,
-                        is_cooling=(target_mode == HVACMode.COOL),
+                if real_target is None:
+                    _LOGGER.warning(
+                        "Cannot set temperature for %s: safety clamp returned None",
+                        self.entity_id,
                     )
+                    return
+                real_target = self._apply_target_constraints(real_target)
+            else:
+                if display_current is None or real_current is None:
+                    _LOGGER.warning(
+                        "Cannot compute temperature delta for %s because sensor or thermostat is missing",
+                        self.entity_id,
+                    )
+                    return
+
+                delta = constrained_target - display_current
+                calculated_real_target = real_current + delta
+                real_target = self._apply_safety_clamp(
+                    calculated_real_target, reference_target=constrained_target
+                )
+                if real_target is None:
+                    _LOGGER.warning(
+                        "Cannot set temperature for %s: safety clamp returned None",
+                        self.entity_id,
+                    )
+                    return
+                real_target = self._apply_target_constraints(real_target)
+                if real_target is not None:
+                    target_mode = kwargs.get(ATTR_HVAC_MODE) or self.hvac_mode
+                    if target_mode in (HVACMode.COOL, HVACMode.HEAT):
+                        real_target = self._prevent_satisfied_rounding_crossover(
+                            desired_real=real_target,
+                            calculated_real=calculated_real_target,
+                            real_current=real_current,
+                            is_cooling=(target_mode == HVACMode.COOL),
+                        )
             payload = {
                 ATTR_ENTITY_ID: self._real_entity_id,
                 ATTR_TEMPERATURE: real_target,
@@ -2787,23 +2791,12 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 )
                 return
 
-            delta = self._virtual_target_temperature - sensor_temp
-
-            if self._max_sync_offset:
-                clamped_delta = max(
-                    -self._max_sync_offset, min(delta, self._max_sync_offset)
-                )
-                if clamped_delta != delta:
-                    _LOGGER.warning(
-                        "Thermostat Proxy (%s): Target offset %.1f exceeded max sync offset (±%.1f). Clamping offset to %.1f.",
-                        self.entity_id,
-                        delta,
-                        self._max_sync_offset,
-                        clamped_delta,
-                    )
-                    delta = clamped_delta
-
-            calculated_real_target = real_current + delta
+            if not self._is_remote_sensor_controlling():
+                delta = 0.0
+                calculated_real_target = self._virtual_target_temperature
+            else:
+                delta = self._virtual_target_temperature - sensor_temp
+                calculated_real_target = real_current + delta
             self._log_debug(
                 "Calculated real target: %s (delta: %s)", calculated_real_target, delta
             )
@@ -2841,7 +2834,10 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 overdrive_active,
                 self._virtual_target_temperature,
             )
-            if self.hvac_mode in (HVACMode.COOL, HVACMode.HEAT):
+            if self._is_remote_sensor_controlling() and self.hvac_mode in (
+                HVACMode.COOL,
+                HVACMode.HEAT,
+            ):
                 desired_real_target = self._prevent_satisfied_rounding_crossover(
                     desired_real_target,
                     calculated_real_target,
@@ -3096,33 +3092,27 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
     ) -> None:
         """Handle realignment when physical thermostat is in dual setpoint mode."""
 
-        delta_low = (
-            self._virtual_target_temperature_low - sensor_temp
-            if self._virtual_target_temperature_low is not None
-            else None
-        )
-        delta_high = (
-            self._virtual_target_temperature_high - sensor_temp
-            if self._virtual_target_temperature_high is not None
-            else None
-        )
+        if not self._is_remote_sensor_controlling():
+            calculated_real_low = self._virtual_target_temperature_low
+            calculated_real_high = self._virtual_target_temperature_high
+        else:
+            delta_low = (
+                self._virtual_target_temperature_low - sensor_temp
+                if self._virtual_target_temperature_low is not None
+                else None
+            )
+            delta_high = (
+                self._virtual_target_temperature_high - sensor_temp
+                if self._virtual_target_temperature_high is not None
+                else None
+            )
 
-        if self._max_sync_offset:
-            if delta_low is not None:
-                delta_low = max(
-                    -self._max_sync_offset, min(delta_low, self._max_sync_offset)
-                )
-            if delta_high is not None:
-                delta_high = max(
-                    -self._max_sync_offset, min(delta_high, self._max_sync_offset)
-                )
-
-        calculated_real_low = (
-            real_current + delta_low if delta_low is not None else None
-        )
-        calculated_real_high = (
-            real_current + delta_high if delta_high is not None else None
-        )
+            calculated_real_low = (
+                real_current + delta_low if delta_low is not None else None
+            )
+            calculated_real_high = (
+                real_current + delta_high if delta_high is not None else None
+            )
 
         overdrive_adjust_low, overdrive_adjust_high = (
             self._evaluate_dual_target_overdrive(
@@ -3199,14 +3189,21 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 self._virtual_target_temperature_high,
             )
 
-        if desired_real_low is not None and calculated_real_low is not None:
-            desired_real_low = self._prevent_satisfied_rounding_crossover(
-                desired_real_low, calculated_real_low, real_current, is_cooling=False
-            )
-        if desired_real_high is not None and calculated_real_high is not None:
-            desired_real_high = self._prevent_satisfied_rounding_crossover(
-                desired_real_high, calculated_real_high, real_current, is_cooling=True
-            )
+        if self._is_remote_sensor_controlling():
+            if desired_real_low is not None and calculated_real_low is not None:
+                desired_real_low = self._prevent_satisfied_rounding_crossover(
+                    desired_real_low,
+                    calculated_real_low,
+                    real_current,
+                    is_cooling=False,
+                )
+            if desired_real_high is not None and calculated_real_high is not None:
+                desired_real_high = self._prevent_satisfied_rounding_crossover(
+                    desired_real_high,
+                    calculated_real_high,
+                    real_current,
+                    is_cooling=True,
+                )
 
         (
             desired_real_low,
@@ -3609,13 +3606,10 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         constrained = self._apply_target_constraints(requested_temp)
         if constrained is None:
             return None, None
-        if display_current is not None and real_current is not None:
+        if self._is_physical_sensor_preset_selected():
+            calc_real = constrained
+        elif display_current is not None and real_current is not None:
             delta = constrained - display_current
-            if self._max_sync_offset and abs(delta) > self._max_sync_offset:
-                raise ValueError(
-                    f"Requested target {constrained} requires an offset of {abs(delta)}°, "
-                    f"which exceeds max_sync_offset ({self._max_sync_offset}°)."
-                )
             calc_real = real_current + delta
         else:
             calc_real = constrained
