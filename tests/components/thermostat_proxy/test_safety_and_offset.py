@@ -1,5 +1,7 @@
 """Tests for safety limits, max_sync_offset, and temperature sanitization."""
 
+from unittest.mock import MagicMock
+
 import pytest
 
 from custom_components.thermostat_proxy.climate import CustomThermostatEntity
@@ -282,3 +284,532 @@ async def test_realign_enforces_max_sync_offset_clamp(hass):
     assert args[2]["temperature"] in (62.0, 63.0)
     assert abs(args[2]["temperature"] - 72.5) <= 10.5
     assert args[2]["temperature"] not in (50.0, 45.0)
+
+
+def _climate_set_calls(hass):
+    """Return all recorded climate.set_temperature service calls."""
+    return [
+        call
+        for call in hass.services.async_call.call_args_list
+        if call.args[:2] == ("climate", "set_temperature")
+    ]
+
+
+def _configure_real_state(
+    hass,
+    proxy: CustomThermostatEntity,
+    hvac_mode: HVACMode,
+    attrs: dict,
+    selected_sensor: str,
+    remote_temp: str | None = None,
+) -> None:
+    """Configure proxy entity_id, physical state, and selected sensor."""
+    proxy.entity_id = "climate.test_proxy"
+    proxy.async_write_ha_state = MagicMock()
+    hass.states.async_set("climate.real", hvac_mode, attrs)
+    proxy._real_state = hass.states.get("climate.real")
+    proxy._update_real_temperature_limits()
+    proxy._selected_sensor_name = selected_sensor
+    if remote_temp is not None:
+        hass.states.async_set("sensor.1", remote_temp, {"unit_of_measurement": "°F"})
+        proxy._sensor_states["sensor.1"] = hass.states.get("sensor.1")
+
+
+@pytest.mark.asyncio
+async def test_physical_preset_direct_passthrough_beyond_max_sync_offset(hass):
+    """Physical preset passes targets directly even when gap from current_temp > max_sync_offset."""
+    # Dual setpoint scenario: current=63.0, low=68.0, high=74.0, max_sync_offset=10.0
+    dual_proxy = create_proxy(
+        hass, max_sync_offset=10.0, real_min_temp=45.0, real_max_temp=90.0
+    )
+    _configure_real_state(
+        hass,
+        dual_proxy,
+        HVACMode.HEAT_COOL,
+        {
+            "current_temperature": 63.0,
+            "target_temp_low": 65.0,
+            "target_temp_high": 72.0,
+            "target_temp_step": 1.0,
+            "min_temp": 45.0,
+            "max_temp": 90.0,
+            "supported_features": (
+                ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
+                | ClimateEntityFeature.PRESET_MODE
+            ),
+        },
+        selected_sensor="Physical",
+    )
+
+    await dual_proxy.async_set_temperature(target_temp_low=68.0, target_temp_high=74.0)
+
+    calls = _climate_set_calls(hass)
+    assert len(calls) == 1
+    assert calls[0].args[2]["target_temp_low"] == 68.0
+    assert calls[0].args[2]["target_temp_high"] == 74.0
+    assert dual_proxy.target_temperature_low == 68.0
+    assert dual_proxy.target_temperature_high == 74.0
+
+    hass.services.async_call.reset_mock()
+
+    # Single setpoint scenario: current=60.0, target=75.0 (15° gap > 10° max_sync_offset)
+    single_proxy = create_proxy(
+        hass, max_sync_offset=10.0, real_min_temp=45.0, real_max_temp=90.0
+    )
+    _configure_real_state(
+        hass,
+        single_proxy,
+        HVACMode.HEAT,
+        {
+            "current_temperature": 60.0,
+            "temperature": 62.0,
+            "target_temp_step": 1.0,
+            "min_temp": 45.0,
+            "max_temp": 90.0,
+            "supported_features": (
+                ClimateEntityFeature.TARGET_TEMPERATURE
+                | ClimateEntityFeature.PRESET_MODE
+            ),
+        },
+        selected_sensor="Physical",
+    )
+
+    await single_proxy.async_set_temperature(temperature=75.0)
+
+    calls = _climate_set_calls(hass)
+    assert len(calls) == 1
+    assert calls[0].args[2]["temperature"] == 75.0
+    assert single_proxy.target_temperature == 75.0
+
+
+@pytest.mark.asyncio
+async def test_physical_preset_passthrough_when_current_temperature_missing(hass):
+    """Physical preset passes single and dual targets directly even if current_temperature is None."""
+    single_proxy = create_proxy(
+        hass, max_sync_offset=10.0, real_min_temp=45.0, real_max_temp=90.0
+    )
+    _configure_real_state(
+        hass,
+        single_proxy,
+        HVACMode.HEAT,
+        {
+            "current_temperature": None,
+            "temperature": 68.0,
+            "target_temp_step": 1.0,
+            "min_temp": 45.0,
+            "max_temp": 90.0,
+            "supported_features": (
+                ClimateEntityFeature.TARGET_TEMPERATURE
+                | ClimateEntityFeature.PRESET_MODE
+            ),
+        },
+        selected_sensor="Physical",
+    )
+
+    await single_proxy.async_set_temperature(temperature=74.0)
+
+    calls = _climate_set_calls(hass)
+    assert len(calls) == 1
+    assert calls[0].args[2]["temperature"] == 74.0
+    assert single_proxy.target_temperature == 74.0
+
+    hass.services.async_call.reset_mock()
+
+    dual_proxy = create_proxy(
+        hass, max_sync_offset=10.0, real_min_temp=45.0, real_max_temp=90.0
+    )
+    _configure_real_state(
+        hass,
+        dual_proxy,
+        HVACMode.HEAT_COOL,
+        {
+            "current_temperature": None,
+            "target_temp_low": 66.0,
+            "target_temp_high": 72.0,
+            "target_temp_step": 1.0,
+            "min_temp": 45.0,
+            "max_temp": 90.0,
+            "supported_features": (
+                ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
+                | ClimateEntityFeature.PRESET_MODE
+            ),
+        },
+        selected_sensor="Physical",
+    )
+
+    await dual_proxy.async_set_temperature(target_temp_low=68.0, target_temp_high=74.0)
+
+    calls = _climate_set_calls(hass)
+    assert len(calls) == 1
+    assert calls[0].args[2]["target_temp_low"] == 68.0
+    assert calls[0].args[2]["target_temp_high"] == 74.0
+    assert dual_proxy.target_temperature_low == 68.0
+    assert dual_proxy.target_temperature_high == 74.0
+
+
+@pytest.mark.asyncio
+async def test_physical_preset_realignment_does_not_clamp_by_max_sync_offset(hass):
+    """Switching back to Physical preset restores full virtual targets without max_sync_offset clamp."""
+    dual_proxy = create_proxy(
+        hass, max_sync_offset=10.0, real_min_temp=45.0, real_max_temp=90.0
+    )
+    _configure_real_state(
+        hass,
+        dual_proxy,
+        HVACMode.HEAT_COOL,
+        {
+            "current_temperature": 63.0,
+            "target_temp_low": 65.0,
+            "target_temp_high": 72.0,
+            "target_temp_step": 1.0,
+            "min_temp": 45.0,
+            "max_temp": 90.0,
+            "supported_features": (
+                ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
+                | ClimateEntityFeature.PRESET_MODE
+            ),
+        },
+        selected_sensor="Sensor 1",
+        remote_temp="65.0",
+    )
+    dual_proxy._virtual_target_temperature_low = 67.0
+    dual_proxy._virtual_target_temperature_high = 74.0
+
+    await dual_proxy.async_set_preset_mode("Physical")
+
+    calls = _climate_set_calls(hass)
+    assert len(calls) == 1
+    assert calls[0].args[2]["target_temp_low"] == 67.0
+    assert calls[0].args[2]["target_temp_high"] == 74.0
+
+    hass.services.async_call.reset_mock()
+
+    single_proxy = create_proxy(
+        hass, max_sync_offset=10.0, real_min_temp=45.0, real_max_temp=90.0
+    )
+    _configure_real_state(
+        hass,
+        single_proxy,
+        HVACMode.HEAT,
+        {
+            "current_temperature": 60.0,
+            "temperature": 62.0,
+            "target_temp_step": 1.0,
+            "min_temp": 45.0,
+            "max_temp": 90.0,
+            "supported_features": (
+                ClimateEntityFeature.TARGET_TEMPERATURE
+                | ClimateEntityFeature.PRESET_MODE
+            ),
+        },
+        selected_sensor="Sensor 1",
+        remote_temp="62.0",
+    )
+    single_proxy._virtual_target_temperature = 75.0
+
+    await single_proxy.async_set_preset_mode("Physical")
+
+    calls = _climate_set_calls(hass)
+    assert len(calls) == 1
+    assert calls[0].args[2]["temperature"] == 75.0
+
+
+@pytest.mark.asyncio
+async def test_remote_sensor_large_room_gap_with_small_sensor_offset_succeeds(hass):
+    """Large target-vs-sensor gap with small sensor-vs-real offset is not blocked or clamped."""
+    # Dual set_temperature and realignment: sensor=62.0, real_current=63.0 (1° offset),
+    # target_high=74.0 (12° room gap > 10° max_sync_offset) -> real_high=75.0.
+    dual_proxy = create_proxy(
+        hass, max_sync_offset=10.0, real_min_temp=45.0, real_max_temp=90.0
+    )
+    _configure_real_state(
+        hass,
+        dual_proxy,
+        HVACMode.HEAT_COOL,
+        {
+            "current_temperature": 63.0,
+            "target_temp_low": 65.0,
+            "target_temp_high": 72.0,
+            "target_temp_step": 1.0,
+            "min_temp": 45.0,
+            "max_temp": 90.0,
+            "supported_features": (
+                ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
+                | ClimateEntityFeature.PRESET_MODE
+            ),
+        },
+        selected_sensor="Sensor 1",
+        remote_temp="62.0",
+    )
+
+    await dual_proxy.async_set_temperature(target_temp_low=68.0, target_temp_high=74.0)
+
+    calls = _climate_set_calls(hass)
+    assert len(calls) == 1
+    assert calls[0].args[2]["target_temp_low"] == 69.0
+    assert calls[0].args[2]["target_temp_high"] == 75.0
+
+    hass.services.async_call.reset_mock()
+    dual_proxy._reset_commanded_targets()
+    dual_proxy._recent_real_target_requests.clear()
+    _configure_real_state(
+        hass,
+        dual_proxy,
+        HVACMode.HEAT_COOL,
+        {
+            "current_temperature": 63.0,
+            "target_temp_low": 65.0,
+            "target_temp_high": 72.0,
+            "target_temp_step": 1.0,
+            "min_temp": 45.0,
+            "max_temp": 90.0,
+            "supported_features": (
+                ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
+                | ClimateEntityFeature.PRESET_MODE
+            ),
+        },
+        selected_sensor="Sensor 1",
+        remote_temp="62.0",
+    )
+    dual_proxy._virtual_target_temperature_low = 68.0
+    dual_proxy._virtual_target_temperature_high = 74.0
+
+    await dual_proxy._async_realign_real_target_from_sensor()
+
+    calls = _climate_set_calls(hass)
+    assert len(calls) == 1
+    assert calls[0].args[2]["target_temp_low"] == 69.0
+    assert calls[0].args[2]["target_temp_high"] == 75.0
+
+    hass.services.async_call.reset_mock()
+
+    # Single set_temperature and realignment: sensor=62.0, real_current=63.0, target=74.0 -> 75.0
+    single_proxy = create_proxy(
+        hass, max_sync_offset=10.0, real_min_temp=45.0, real_max_temp=90.0
+    )
+    _configure_real_state(
+        hass,
+        single_proxy,
+        HVACMode.HEAT,
+        {
+            "current_temperature": 63.0,
+            "temperature": 65.0,
+            "target_temp_step": 1.0,
+            "min_temp": 45.0,
+            "max_temp": 90.0,
+            "supported_features": (
+                ClimateEntityFeature.TARGET_TEMPERATURE
+                | ClimateEntityFeature.PRESET_MODE
+            ),
+        },
+        selected_sensor="Sensor 1",
+        remote_temp="62.0",
+    )
+
+    await single_proxy.async_set_temperature(temperature=74.0)
+
+    calls = _climate_set_calls(hass)
+    assert len(calls) == 1
+    assert calls[0].args[2]["temperature"] == 75.0
+
+    hass.services.async_call.reset_mock()
+    single_proxy._reset_commanded_targets()
+    single_proxy._recent_real_target_requests.clear()
+    _configure_real_state(
+        hass,
+        single_proxy,
+        HVACMode.HEAT,
+        {
+            "current_temperature": 63.0,
+            "temperature": 65.0,
+            "target_temp_step": 1.0,
+            "min_temp": 45.0,
+            "max_temp": 90.0,
+            "supported_features": (
+                ClimateEntityFeature.TARGET_TEMPERATURE
+                | ClimateEntityFeature.PRESET_MODE
+            ),
+        },
+        selected_sensor="Sensor 1",
+        remote_temp="62.0",
+    )
+    single_proxy._virtual_target_temperature = 74.0
+
+    await single_proxy._async_realign_real_target_from_sensor()
+
+    calls = _climate_set_calls(hass)
+    assert len(calls) == 1
+    assert calls[0].args[2]["temperature"] == 75.0
+
+
+@pytest.mark.asyncio
+async def test_faulty_remote_sensor_drift_clamps_without_raising(hass):
+    """Faulty remote sensor drifting beyond max_sync_offset clamps cleanly without ValueError."""
+    # Single mode cold drift: sensor=40.0, real_current=68.0, target=70.0 -> clamped to 80.0
+    single_proxy = create_proxy(
+        hass, max_sync_offset=10.0, real_min_temp=45.0, real_max_temp=90.0
+    )
+    _configure_real_state(
+        hass,
+        single_proxy,
+        HVACMode.HEAT,
+        {
+            "current_temperature": 68.0,
+            "temperature": 68.0,
+            "target_temp_step": 1.0,
+            "min_temp": 45.0,
+            "max_temp": 90.0,
+            "supported_features": (
+                ClimateEntityFeature.TARGET_TEMPERATURE
+                | ClimateEntityFeature.PRESET_MODE
+            ),
+        },
+        selected_sensor="Sensor 1",
+        remote_temp="40.0",
+    )
+
+    await single_proxy.async_set_temperature(temperature=70.0)
+
+    calls = _climate_set_calls(hass)
+    assert len(calls) == 1
+    assert calls[0].args[2]["temperature"] == 80.0
+    assert single_proxy.target_temperature == 70.0
+
+    hass.services.async_call.reset_mock()
+    single_proxy._reset_commanded_targets()
+    single_proxy._recent_real_target_requests.clear()
+
+    # Single mode hot drift: sensor=95.0, real_current=68.0, target=70.0 -> clamped to 60.0
+    _configure_real_state(
+        hass,
+        single_proxy,
+        HVACMode.COOL,
+        {
+            "current_temperature": 68.0,
+            "temperature": 68.0,
+            "target_temp_step": 1.0,
+            "min_temp": 45.0,
+            "max_temp": 90.0,
+            "supported_features": (
+                ClimateEntityFeature.TARGET_TEMPERATURE
+                | ClimateEntityFeature.PRESET_MODE
+            ),
+        },
+        selected_sensor="Sensor 1",
+        remote_temp="95.0",
+    )
+
+    await single_proxy.async_set_temperature(temperature=70.0)
+
+    calls = _climate_set_calls(hass)
+    assert len(calls) == 1
+    assert calls[0].args[2]["temperature"] == 60.0
+    assert single_proxy.target_temperature == 70.0
+
+    hass.services.async_call.reset_mock()
+
+    # Dual mode cold drift: sensor=40.0, real_current=68.0, low=68.0, high=74.0 -> 78.0, 84.0
+    dual_proxy = create_proxy(
+        hass, max_sync_offset=10.0, real_min_temp=45.0, real_max_temp=90.0
+    )
+    _configure_real_state(
+        hass,
+        dual_proxy,
+        HVACMode.HEAT_COOL,
+        {
+            "current_temperature": 68.0,
+            "target_temp_low": 65.0,
+            "target_temp_high": 75.0,
+            "target_temp_step": 1.0,
+            "min_temp": 45.0,
+            "max_temp": 90.0,
+            "supported_features": (
+                ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
+                | ClimateEntityFeature.PRESET_MODE
+            ),
+        },
+        selected_sensor="Sensor 1",
+        remote_temp="40.0",
+    )
+
+    await dual_proxy.async_set_temperature(target_temp_low=68.0, target_temp_high=74.0)
+
+    calls = _climate_set_calls(hass)
+    assert len(calls) == 1
+    assert calls[0].args[2]["target_temp_low"] == 78.0
+    assert calls[0].args[2]["target_temp_high"] == 84.0
+    assert dual_proxy.target_temperature_low == 68.0
+    assert dual_proxy.target_temperature_high == 74.0
+
+
+@pytest.mark.asyncio
+async def test_unavailable_remote_sensor_fallback_passthrough_without_real_current(
+    hass,
+):
+    """Unavailable remote sensor fallback passes single and dual targets directly even if real_current is None."""
+    single_proxy = create_proxy(
+        hass, max_sync_offset=10.0, real_min_temp=45.0, real_max_temp=90.0
+    )
+    _configure_real_state(
+        hass,
+        single_proxy,
+        HVACMode.HEAT,
+        {
+            "current_temperature": None,
+            "temperature": 68.0,
+            "target_temp_step": 1.0,
+            "min_temp": 45.0,
+            "max_temp": 90.0,
+            "supported_features": (
+                ClimateEntityFeature.TARGET_TEMPERATURE
+                | ClimateEntityFeature.PRESET_MODE
+            ),
+        },
+        selected_sensor="Sensor 1",
+        remote_temp="unavailable",
+    )
+
+    assert not single_proxy._is_remote_sensor_controlling()
+
+    await single_proxy.async_set_temperature(temperature=74.0)
+
+    calls = _climate_set_calls(hass)
+    assert len(calls) == 1
+    assert calls[0].args[2]["temperature"] == 74.0
+    assert single_proxy.target_temperature == 74.0
+
+    hass.services.async_call.reset_mock()
+
+    dual_proxy = create_proxy(
+        hass, max_sync_offset=10.0, real_min_temp=45.0, real_max_temp=90.0
+    )
+    _configure_real_state(
+        hass,
+        dual_proxy,
+        HVACMode.HEAT_COOL,
+        {
+            "current_temperature": None,
+            "target_temp_low": 66.0,
+            "target_temp_high": 72.0,
+            "target_temp_step": 1.0,
+            "min_temp": 45.0,
+            "max_temp": 90.0,
+            "supported_features": (
+                ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
+                | ClimateEntityFeature.PRESET_MODE
+            ),
+        },
+        selected_sensor="Sensor 1",
+        remote_temp="unavailable",
+    )
+
+    assert not dual_proxy._is_remote_sensor_controlling()
+
+    await dual_proxy.async_set_temperature(target_temp_low=68.0, target_temp_high=74.0)
+
+    calls = _climate_set_calls(hass)
+    assert len(calls) == 1
+    assert calls[0].args[2]["target_temp_low"] == 68.0
+    assert calls[0].args[2]["target_temp_high"] == 74.0
+    assert dual_proxy.target_temperature_low == 68.0
+    assert dual_proxy.target_temperature_high == 74.0
