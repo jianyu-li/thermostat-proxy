@@ -872,3 +872,174 @@ async def test_real_rounding_hysteresis_probe_does_not_emit_clamp_warning(hass, 
 
     assert result == 75.0
     assert not any("Clamping to" in record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_preset_trigger_source_preserved_over_intervening_events(hass):
+    """Preset trigger survives intervening real/sensor events in coalescing and cooldown retry."""
+    sensors = [
+        {"name": "Office", "entity_id": "sensor.office"},
+        {"name": "Kids Room", "entity_id": "sensor.kids_room"},
+    ]
+    proxy = _make_proxy(
+        hass,
+        hvac_mode=HVACMode.HEAT_COOL,
+        real_attrs={
+            "current_temperature": 68.0,
+            "target_temp_low": 71.0,
+            "target_temp_high": 77.0,
+            "hvac_action": HVACAction.HEATING,
+            "temperature_unit": "°F",
+            "min_temp": 50.0,
+            "max_temp": 90.0,
+            "target_temp_step": 1.0,
+            "supported_features": (
+                ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
+                | ClimateEntityFeature.PRESET_MODE
+            ),
+        },
+        sensors=sensors,
+        cooldown_period=60,
+    )
+    hass.states.async_set("sensor.office", "65.0", {"unit_of_measurement": "°F"})
+    hass.states.async_set("sensor.kids_room", "67.8", {"unit_of_measurement": "°F"})
+    proxy._sensor_states["sensor.office"] = hass.states.get("sensor.office")
+    proxy._sensor_states["sensor.kids_room"] = hass.states.get("sensor.kids_room")
+    proxy._selected_sensor_name = "Office"
+    proxy._virtual_target_temperature_low = 68.0
+    proxy._virtual_target_temperature_high = 74.0
+
+    # Part 1: _schedule_target_realign coalescing keeps "preset" regardless of arrival order
+    with (
+        patch.object(
+            proxy, "_async_realign_real_target_from_sensor", new=AsyncMock()
+        ) as mock_realign,
+        patch.object(
+            hass,
+            "async_create_task",
+            side_effect=lambda coro, *args, **kwargs: asyncio.Task(
+                coro, loop=hass.loop
+            ),
+        ),
+    ):
+        proxy._schedule_target_realign(trigger_source="preset")
+        proxy._schedule_target_realign(trigger_source="real")
+        assert proxy._realign_trigger_source == "preset"
+        await proxy._sensor_realign_task
+        mock_realign.assert_awaited_once_with(retry=False, trigger_source="preset")
+
+        mock_realign.reset_mock()
+
+        proxy._schedule_target_realign(trigger_source="real")
+        proxy._schedule_target_realign(trigger_source="preset")
+        assert proxy._realign_trigger_source == "preset"
+        await proxy._sensor_realign_task
+        mock_realign.assert_awaited_once_with(retry=False, trigger_source="preset")
+
+    # Part 2: Mid-cycle preset switch blocked by cooldown keeps "preset" when real event arrives
+    proxy._last_real_write_time = time.monotonic()
+    unsub_mock = MagicMock()
+    with patch(
+        "custom_components.thermostat_proxy.climate.async_call_later",
+        return_value=unsub_mock,
+    ) as mock_call_later:
+        await proxy.async_set_preset_mode("Kids Room")
+        assert mock_call_later.call_count == 1
+        assert proxy._pending_cooldown_trigger_source == "preset"
+
+        # Intervening "real" tick must NOT overwrite "preset"
+        await proxy._async_realign_real_target_from_sensor(trigger_source="real")
+        assert proxy._pending_cooldown_trigger_source == "preset"
+
+    # When cooldown expires and retry fires, active-cycle hold must still be bypassed
+    proxy._last_real_write_time = 0.0
+    proxy._async_cooldown_retry(dt_util.utcnow())
+    await hass.async_block_till_done()
+
+    calls = _climate_set_calls(hass)
+    assert len(calls) == 1
+    assert calls[0].args[2]["target_temp_low"] == 68.0
+
+
+@pytest.mark.asyncio
+async def test_manual_set_temperature_cancels_pending_cooldown_timer(hass):
+    """Manual single and dual set_temperature calls cancel any armed cooldown timer."""
+    # Single mode
+    single_proxy = _make_proxy(
+        hass,
+        hvac_mode=HVACMode.HEAT,
+        real_attrs={
+            "current_temperature": 67.0,
+            "temperature": 68.0,
+            "hvac_action": HVACAction.IDLE,
+            "temperature_unit": "°F",
+            "min_temp": 50.0,
+            "max_temp": 90.0,
+            "target_temp_step": 1.0,
+            "supported_features": (
+                ClimateEntityFeature.TARGET_TEMPERATURE
+                | ClimateEntityFeature.PRESET_MODE
+            ),
+        },
+        remote_temp="68.0",
+        cooldown_period=60,
+    )
+    single_proxy._virtual_target_temperature = 69.0
+    single_proxy._last_real_write_time = time.monotonic()
+
+    single_unsub = MagicMock()
+    with patch(
+        "custom_components.thermostat_proxy.climate.async_call_later",
+        return_value=single_unsub,
+    ):
+        await single_proxy._async_realign_real_target_from_sensor(trigger_source="real")
+
+    assert single_proxy._cooldown_timer_unsub is single_unsub
+    assert single_proxy._pending_cooldown_trigger_source == "real"
+
+    await single_proxy.async_set_temperature(temperature=70.0)
+
+    single_unsub.assert_called_once()
+    assert single_proxy._cooldown_timer_unsub is None
+    assert single_proxy._pending_cooldown_trigger_source is None
+
+    # Dual mode
+    dual_proxy = _make_proxy(
+        hass,
+        hvac_mode=HVACMode.HEAT_COOL,
+        real_attrs={
+            "current_temperature": 68.0,
+            "target_temp_low": 66.0,
+            "target_temp_high": 74.0,
+            "hvac_action": HVACAction.IDLE,
+            "temperature_unit": "°F",
+            "min_temp": 50.0,
+            "max_temp": 90.0,
+            "target_temp_step": 1.0,
+            "supported_features": (
+                ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
+                | ClimateEntityFeature.PRESET_MODE
+            ),
+        },
+        remote_temp="68.0",
+        cooldown_period=60,
+    )
+    dual_proxy._virtual_target_temperature_low = 67.0
+    dual_proxy._virtual_target_temperature_high = 74.0
+    dual_proxy._last_real_write_time = time.monotonic()
+
+    dual_unsub = MagicMock()
+    with patch(
+        "custom_components.thermostat_proxy.climate.async_call_later",
+        return_value=dual_unsub,
+    ):
+        await dual_proxy._async_realign_real_target_from_sensor(trigger_source="real")
+
+    assert dual_proxy._cooldown_timer_unsub is dual_unsub
+    assert dual_proxy._pending_cooldown_trigger_source == "real"
+
+    await dual_proxy.async_set_temperature(target_temp_low=68.0, target_temp_high=74.0)
+
+    dual_unsub.assert_called_once()
+    assert dual_proxy._cooldown_timer_unsub is None
+    assert dual_proxy._pending_cooldown_trigger_source is None

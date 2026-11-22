@@ -963,12 +963,24 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         except (ValueError, TypeError):
             return None
 
+    @staticmethod
+    def _coalesce_trigger_source(
+        current: str | None, incoming: str | None
+    ) -> str | None:
+        """Coalesce queued realignment trigger sources while preserving 'preset'."""
+        if current == "preset" or incoming == "preset":
+            return "preset"
+        if current == incoming:
+            return current
+        return None
+
     def _schedule_target_realign(
         self, retry: bool = False, trigger_source: str | None = None
     ) -> None:
         if self._sensor_realign_task and not self._sensor_realign_task.done():
-            if trigger_source != self._realign_trigger_source:
-                self._realign_trigger_source = None
+            self._realign_trigger_source = self._coalesce_trigger_source(
+                self._realign_trigger_source, trigger_source
+            )
             return
 
         self._realign_trigger_source = trigger_source
@@ -2046,6 +2058,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 self._remove_real_target_request(payload[ATTR_TARGET_TEMP_LOW])
             raise
 
+        self._cancel_cooldown_timer()
         if new_virtual_high is not None:
             self._virtual_target_temperature_high = new_virtual_high
         if new_virtual_low is not None:
@@ -2091,17 +2104,9 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
             display_current = self.native_current_temperature
             real_current = self._get_real_current_temperature()
-            if self._is_physical_sensor_preset_selected():
-                real_target = self._apply_safety_clamp(
-                    constrained_target, reference_target=constrained_target
-                )
-                if real_target is None:
-                    _LOGGER.warning(
-                        "Cannot set temperature for %s: safety clamp returned None",
-                        self.entity_id,
-                    )
-                    return
-                real_target = self._apply_target_constraints(real_target)
+            is_remote_controlling = self._is_remote_sensor_controlling()
+            if not is_remote_controlling:
+                calculated_real_target = constrained_target
             else:
                 if display_current is None or real_current is None:
                     _LOGGER.warning(
@@ -2112,25 +2117,26 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
                 delta = constrained_target - display_current
                 calculated_real_target = real_current + delta
-                real_target = self._apply_safety_clamp(
-                    calculated_real_target, reference_target=constrained_target
+
+            real_target = self._apply_safety_clamp(
+                calculated_real_target, reference_target=constrained_target
+            )
+            if real_target is None:
+                _LOGGER.warning(
+                    "Cannot set temperature for %s: safety clamp returned None",
+                    self.entity_id,
                 )
-                if real_target is None:
-                    _LOGGER.warning(
-                        "Cannot set temperature for %s: safety clamp returned None",
-                        self.entity_id,
+                return
+            real_target = self._apply_target_constraints(real_target)
+            if is_remote_controlling and real_target is not None:
+                target_mode = kwargs.get(ATTR_HVAC_MODE) or self.hvac_mode
+                if target_mode in (HVACMode.COOL, HVACMode.HEAT):
+                    real_target = self._prevent_satisfied_rounding_crossover(
+                        desired_real=real_target,
+                        calculated_real=calculated_real_target,
+                        real_current=real_current,
+                        is_cooling=(target_mode == HVACMode.COOL),
                     )
-                    return
-                real_target = self._apply_target_constraints(real_target)
-                if real_target is not None:
-                    target_mode = kwargs.get(ATTR_HVAC_MODE) or self.hvac_mode
-                    if target_mode in (HVACMode.COOL, HVACMode.HEAT):
-                        real_target = self._prevent_satisfied_rounding_crossover(
-                            desired_real=real_target,
-                            calculated_real=calculated_real_target,
-                            real_current=real_current,
-                            is_cooling=(target_mode == HVACMode.COOL),
-                        )
             payload = {
                 ATTR_ENTITY_ID: self._real_entity_id,
                 ATTR_TEMPERATURE: real_target,
@@ -2189,6 +2195,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 self._remove_real_target_request(real_target)
                 raise
 
+            self._cancel_cooldown_timer()
             self._virtual_target_temperature = constrained_target
             self.async_write_ha_state()
 
@@ -2759,8 +2766,12 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     self._cooldown_timer_unsub = async_call_later(
                         self.hass, retry_delay, self._async_cooldown_retry
                     )
-                elif trigger_source != self._pending_cooldown_trigger_source:
-                    self._pending_cooldown_trigger_source = None
+                else:
+                    self._pending_cooldown_trigger_source = (
+                        self._coalesce_trigger_source(
+                            self._pending_cooldown_trigger_source, trigger_source
+                        )
+                    )
                 return
 
         # If we proceed, clear any pending retry since we are acting now
@@ -3606,7 +3617,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         constrained = self._apply_target_constraints(requested_temp)
         if constrained is None:
             return None, None
-        if self._is_physical_sensor_preset_selected():
+        is_remote_controlling = self._is_remote_sensor_controlling()
+        if not is_remote_controlling:
             calc_real = constrained
         elif display_current is not None and real_current is not None:
             delta = constrained - display_current
@@ -3616,11 +3628,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         real_temp = self._apply_target_constraints(
             self._apply_safety_clamp(calc_real, reference_target=constrained)
         )
-        if (
-            not self._is_physical_sensor_preset_selected()
-            and real_temp is not None
-            and real_current is not None
-        ):
+        if is_remote_controlling and real_temp is not None and real_current is not None:
             real_temp = self._prevent_satisfied_rounding_crossover(
                 real_temp, calc_real, real_current, is_cooling=is_cooling
             )
