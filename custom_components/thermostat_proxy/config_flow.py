@@ -17,6 +17,7 @@ from .const import (
     CONF_DEFAULT_SENSOR,
     CONF_DEFAULT_TARGET_HUMIDITY,
     CONF_DISABLE_AUTO_SWITCH,
+    CONF_FALLBACK_TIMEOUT,
     CONF_MAX_HUMIDITY_OVERCOOL,
     CONF_MAX_SYNC_OFFSET,
     CONF_MAX_TEMP,
@@ -37,6 +38,7 @@ from .const import (
     CONF_USE_LAST_ACTIVE_SENSOR,
     DEFAULT_COOLDOWN_PERIOD,
     DEFAULT_DISABLE_AUTO_SWITCH,
+    DEFAULT_FALLBACK_TIMEOUT,
     DEFAULT_MAX_HUMIDITY_OVERCOOL,
     DEFAULT_MAX_SYNC_OFFSET,
     DEFAULT_NAME,
@@ -47,6 +49,7 @@ from .const import (
     DEFAULT_TARGET_HUMIDITY,
     DOMAIN,
     MAX_COOLDOWN_PERIOD_SECONDS,
+    MAX_FALLBACK_TIMEOUT_MINUTES,
     MAX_HUMIDITY_OVERCOOL,
     MAX_MIN_DUAL_TEMP_SPREAD,
     MAX_OVERDRIVE_OFFSET,
@@ -189,6 +192,7 @@ def _sync_reconfigure_options(
         CONF_PHYSICAL_TEMPERATURE_SENSOR,
         CONF_DEFAULT_SENSOR,
         CONF_COOLDOWN_PERIOD,
+        CONF_FALLBACK_TIMEOUT,
         CONF_MIN_TEMP,
         CONF_MAX_TEMP,
         CONF_MAX_SYNC_OFFSET,
@@ -252,6 +256,16 @@ def _parse_and_validate_runtime_input(
     data[CONF_PHYSICAL_TEMPERATURE_SENSOR] = physical_temp_sensor
     data[CONF_COOLDOWN_PERIOD] = user_input.get(
         CONF_COOLDOWN_PERIOD, DEFAULT_COOLDOWN_PERIOD
+    )
+    data[CONF_FALLBACK_TIMEOUT] = max(
+        0,
+        int(
+            float(
+                _value_or_default(
+                    user_input, CONF_FALLBACK_TIMEOUT, DEFAULT_FALLBACK_TIMEOUT
+                )
+            )
+        ),
     )
     data[CONF_MIN_TEMP] = min_temp
     data[CONF_MAX_TEMP] = max_temp
@@ -422,6 +436,22 @@ def _build_cooldown_field(cooldown_period: Any) -> tuple[Any, Any]:
     )
 
 
+def _build_fallback_timeout_field(fallback_timeout: Any) -> tuple[Any, Any]:
+    """Build selector field tuple for the sensor fallback timeout."""
+    return (
+        vol.Optional(CONF_FALLBACK_TIMEOUT, default=fallback_timeout),
+        selector.NumberSelector(
+            selector.NumberSelectorConfig(
+                min=0,
+                max=MAX_FALLBACK_TIMEOUT_MINUTES,
+                step=1,
+                unit_of_measurement="minutes",
+                mode=selector.NumberSelectorMode.BOX,
+            )
+        ),
+    )
+
+
 def _build_threshold_field(threshold: Any) -> tuple[Any, Any]:
     """Build selector field tuple for sensor change threshold."""
     return (
@@ -478,6 +508,11 @@ def _build_runtime_settings_schema(
     )
     schema_fields[cooldown_key] = cooldown_val
 
+    fallback_key, fallback_val = _build_fallback_timeout_field(
+        settings.get(CONF_FALLBACK_TIMEOUT, DEFAULT_FALLBACK_TIMEOUT)
+    )
+    schema_fields[fallback_key] = fallback_val
+
     schema_fields.update(
         _build_temperature_limit_fields(
             settings.get(CONF_MIN_TEMP),
@@ -531,6 +566,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._physical_temperature_sensor: str | None = None
         self._use_last_active_sensor: bool = False
         self._cooldown_period: int = DEFAULT_COOLDOWN_PERIOD
+        self._fallback_timeout: int = DEFAULT_FALLBACK_TIMEOUT
         self._min_temp: float | None = None
         self._max_temp: float | None = None
         self._max_sync_offset: float | None = None
@@ -612,6 +648,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._default_sensor = settings[CONF_DEFAULT_SENSOR]
         self._use_last_active_sensor = settings[CONF_USE_LAST_ACTIVE_SENSOR]
         self._cooldown_period = settings[CONF_COOLDOWN_PERIOD]
+        self._fallback_timeout = settings[CONF_FALLBACK_TIMEOUT]
         self._min_temp = settings[CONF_MIN_TEMP]
         self._max_temp = settings[CONF_MAX_TEMP]
         self._max_sync_offset = settings[CONF_MAX_SYNC_OFFSET]
@@ -930,6 +967,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_PHYSICAL_TEMPERATURE_SENSOR
                     ]
                     self._cooldown_period = runtime_data[CONF_COOLDOWN_PERIOD]
+                    self._fallback_timeout = runtime_data[CONF_FALLBACK_TIMEOUT]
                     self._min_temp = runtime_data[CONF_MIN_TEMP]
                     self._max_temp = runtime_data[CONF_MAX_TEMP]
                     self._max_sync_offset = runtime_data[CONF_MAX_SYNC_OFFSET]
@@ -980,6 +1018,7 @@ class CustomThermostatConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         current_settings = {
             CONF_PHYSICAL_TEMPERATURE_SENSOR: self._physical_temperature_sensor,
             CONF_COOLDOWN_PERIOD: self._cooldown_period,
+            CONF_FALLBACK_TIMEOUT: self._fallback_timeout,
             CONF_MIN_TEMP: self._min_temp,
             CONF_MAX_TEMP: self._max_temp,
             CONF_MAX_SYNC_OFFSET: self._max_sync_offset,

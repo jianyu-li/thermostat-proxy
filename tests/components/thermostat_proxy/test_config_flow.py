@@ -17,6 +17,7 @@ from custom_components.thermostat_proxy.const import (
     CONF_DEFAULT_SENSOR,
     CONF_DEFAULT_TARGET_HUMIDITY,
     CONF_DISABLE_AUTO_SWITCH,
+    CONF_FALLBACK_TIMEOUT,
     CONF_MAX_HUMIDITY_OVERCOOL,
     CONF_MAX_TEMP,
     CONF_MIN_DUAL_TEMP_SPREAD,
@@ -28,9 +29,11 @@ from custom_components.thermostat_proxy.const import (
     CONF_SENSOR_CHANGE_THRESHOLD,
     CONF_SENSORS,
     CONF_THERMOSTAT,
+    DEFAULT_FALLBACK_TIMEOUT,
     DEFAULT_SENSOR_LAST_ACTIVE,
     DOMAIN,
     MAX_COOLDOWN_PERIOD_SECONDS,
+    MAX_FALLBACK_TIMEOUT_MINUTES,
     MAX_HUMIDITY_OVERCOOL,
     MAX_MIN_DUAL_TEMP_SPREAD,
     MAX_SENSOR_CHANGE_THRESHOLD,
@@ -128,6 +131,7 @@ async def test_user_flow_success(hass: HomeAssistant) -> None:
         result["flow_id"],
         {
             "cooldown_period": 1800,
+            CONF_FALLBACK_TIMEOUT: 30,
             "physical_sensor_name": "Physical",
             "min_dual_temp_spread": 4.0,
             CONF_OVERDRIVE_OFFSET: 0.5,
@@ -142,6 +146,7 @@ async def test_user_flow_success(hass: HomeAssistant) -> None:
     assert result["data"][CONF_THERMOSTAT] == "climate.real"
     assert result["data"][CONF_SENSORS][0]["name"] == "Remote"
     assert result["data"][CONF_COOLDOWN_PERIOD] == 1800
+    assert result["data"][CONF_FALLBACK_TIMEOUT] == 30
     assert result["data"][CONF_PHYSICAL_SENSOR_NAME] == "Physical"
     assert result["data"][CONF_MIN_DUAL_TEMP_SPREAD] == 4.0
     assert result["data"][CONF_OVERDRIVE_OFFSET] == 0.5
@@ -176,6 +181,7 @@ async def test_options_flow(hass: HomeAssistant) -> None:
         result["flow_id"],
         user_input={
             "cooldown_period": 1800,
+            CONF_FALLBACK_TIMEOUT: 45,
             "default_sensor": "Remote",
             "min_dual_temp_spread": 4.5,
             CONF_OVERDRIVE_OFFSET: 0.5,
@@ -187,6 +193,7 @@ async def test_options_flow(hass: HomeAssistant) -> None:
 
     assert result["type"] == FlowResultType.CREATE_ENTRY
     assert result["data"]["cooldown_period"] == 1800
+    assert result["data"][CONF_FALLBACK_TIMEOUT] == 45
     assert result["data"]["default_sensor"] == "Remote"
     assert result["data"]["min_dual_temp_spread"] == 4.5
     assert result["data"][CONF_OVERDRIVE_OFFSET] == 0.5
@@ -410,6 +417,7 @@ async def test_reconfigure_flow_preserves_options_overrides(
             ],
             CONF_DEFAULT_SENSOR: "Remote 1",
             CONF_COOLDOWN_PERIOD: 300,
+            CONF_FALLBACK_TIMEOUT: 10,
             CONF_MIN_TEMP: 15.0,
             CONF_MAX_TEMP: 25.0,
             CONF_OVERDRIVE_OFFSET: 1.0,
@@ -417,6 +425,7 @@ async def test_reconfigure_flow_preserves_options_overrides(
         options={
             CONF_DEFAULT_SENSOR: "Remote 2",
             CONF_COOLDOWN_PERIOD: 1800,
+            CONF_FALLBACK_TIMEOUT: 60,
             CONF_MIN_TEMP: 18.0,
             CONF_MAX_TEMP: 28.0,
             CONF_OVERDRIVE_OFFSET: 2.5,
@@ -457,6 +466,7 @@ async def test_reconfigure_flow_preserves_options_overrides(
     }
     assert schema_defaults[CONF_DEFAULT_SENSOR] == "Remote 2"
     assert schema_defaults[CONF_COOLDOWN_PERIOD] == 1800
+    assert schema_defaults[CONF_FALLBACK_TIMEOUT] == 60
     assert schema_defaults[CONF_MIN_TEMP] == 18.0
     assert schema_defaults[CONF_MAX_TEMP] == 28.0
     assert schema_defaults[CONF_OVERDRIVE_OFFSET] == 2.5
@@ -471,12 +481,14 @@ async def test_reconfigure_flow_preserves_options_overrides(
 
     assert entry.data[CONF_DEFAULT_SENSOR] == "Remote 2"
     assert entry.data[CONF_COOLDOWN_PERIOD] == 1800
+    assert entry.data[CONF_FALLBACK_TIMEOUT] == 60
     assert entry.data[CONF_MIN_TEMP] == 18.0
     assert entry.data[CONF_MAX_TEMP] == 28.0
     assert entry.data[CONF_OVERDRIVE_OFFSET] == 2.5
 
     assert entry.options[CONF_DEFAULT_SENSOR] == "Remote 2"
     assert entry.options[CONF_COOLDOWN_PERIOD] == 1800
+    assert entry.options[CONF_FALLBACK_TIMEOUT] == 60
     assert entry.options[CONF_MIN_TEMP] == 18.0
     assert entry.options[CONF_MAX_TEMP] == 28.0
     assert entry.options[CONF_OVERDRIVE_OFFSET] == 2.5
@@ -596,6 +608,16 @@ def test_parse_and_validate_runtime_input() -> None:
     assert data["min_temp"] == 18.0
     assert data["max_temp"] == 26.0
     assert data["cooldown_period"] == 600
+    assert data[CONF_FALLBACK_TIMEOUT] == DEFAULT_FALLBACK_TIMEOUT
+
+    data_zero, error_zero = _parse_and_validate_runtime_input(
+        {CONF_FALLBACK_TIMEOUT: 0},
+        available_default_options=["Living Room"],
+        fallback_disable_auto_switch=False,
+        fallback_preserve_virtual_target=False,
+    )
+    assert error_zero is None
+    assert data_zero[CONF_FALLBACK_TIMEOUT] == 0
 
 
 def test_extract_entry_runtime_settings() -> None:
@@ -611,6 +633,7 @@ def test_extract_entry_runtime_settings() -> None:
         options={
             CONF_DEFAULT_SENSOR: DEFAULT_SENSOR_LAST_ACTIVE,
             CONF_COOLDOWN_PERIOD: 900,
+            CONF_FALLBACK_TIMEOUT: 0,
             CONF_DISABLE_AUTO_SWITCH: True,
         },
     )
@@ -618,6 +641,7 @@ def test_extract_entry_runtime_settings() -> None:
     assert settings[CONF_DEFAULT_SENSOR] is None
     assert settings["use_last_active_sensor"] is True
     assert settings[CONF_COOLDOWN_PERIOD] == 900
+    assert settings[CONF_FALLBACK_TIMEOUT] == 0
     assert settings[CONF_MIN_TEMP] == 15.0
     assert settings[CONF_DISABLE_AUTO_SWITCH] is True
 
@@ -748,6 +772,19 @@ async def test_schema_bounds_validation_options_and_finalize(
         options_schema({CONF_COOLDOWN_PERIOD: -1})
     with pytest.raises(vol.Invalid):
         options_schema({CONF_COOLDOWN_PERIOD: MAX_COOLDOWN_PERIOD_SECONDS + 1})
+
+    # Fallback timeout (0 to MAX_FALLBACK_TIMEOUT_MINUTES=1440)
+    assert options_schema({CONF_FALLBACK_TIMEOUT: 0})[CONF_FALLBACK_TIMEOUT] == 0
+    assert (
+        options_schema({CONF_FALLBACK_TIMEOUT: MAX_FALLBACK_TIMEOUT_MINUTES})[
+            CONF_FALLBACK_TIMEOUT
+        ]
+        == MAX_FALLBACK_TIMEOUT_MINUTES
+    )
+    with pytest.raises(vol.Invalid):
+        options_schema({CONF_FALLBACK_TIMEOUT: -1})
+    with pytest.raises(vol.Invalid):
+        options_schema({CONF_FALLBACK_TIMEOUT: MAX_FALLBACK_TIMEOUT_MINUTES + 1})
 
     # Sensor change threshold (0.0 to MAX_SENSOR_CHANGE_THRESHOLD=10.0)
     assert (

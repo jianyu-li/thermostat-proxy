@@ -75,6 +75,7 @@ from .const import (
     CONF_DEFAULT_SENSOR,
     CONF_DEFAULT_TARGET_HUMIDITY,
     CONF_DISABLE_AUTO_SWITCH,
+    CONF_FALLBACK_TIMEOUT,
     CONF_MAX_HUMIDITY_OVERCOOL,
     CONF_MAX_SYNC_OFFSET,
     CONF_MAX_TEMP,
@@ -95,6 +96,7 @@ from .const import (
     CONF_USE_LAST_ACTIVE_SENSOR,
     DEFAULT_COOLDOWN_PERIOD,
     DEFAULT_DISABLE_AUTO_SWITCH,
+    DEFAULT_FALLBACK_TIMEOUT,
     DEFAULT_HUMIDITY_DEADBAND,
     DEFAULT_MAX_HUMIDITY_OVERCOOL,
     DEFAULT_MIN_DUAL_TEMP_SPREAD_CELSIUS,
@@ -104,6 +106,7 @@ from .const import (
     DEFAULT_PRESERVE_VIRTUAL_TARGET,
     DEFAULT_SENSOR_CHANGE_THRESHOLD,
     DEFAULT_TARGET_HUMIDITY,
+    MAX_FALLBACK_TIMEOUT_MINUTES,
     MAX_TARGET_HUMIDITY,
     MIN_TARGET_HUMIDITY,
     OVERDRIVE_ADJUSTMENT_COOL,
@@ -199,6 +202,10 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
         vol.Optional(CONF_USE_LAST_ACTIVE_SENSOR, default=False): cv.boolean,
         vol.Optional(CONF_COOLDOWN_PERIOD, default=DEFAULT_COOLDOWN_PERIOD): vol.All(
             cv.time_period, cv.positive_timedelta
+        ),
+        vol.Optional(CONF_FALLBACK_TIMEOUT, default=DEFAULT_FALLBACK_TIMEOUT): vol.All(
+            vol.Coerce(int),
+            vol.Range(min=0, max=MAX_FALLBACK_TIMEOUT_MINUTES),
         ),
         vol.Optional(CONF_MIN_TEMP): vol.Coerce(float),
         vol.Optional(CONF_MAX_TEMP): vol.Coerce(float),
@@ -328,6 +335,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         physical_sensor_name: str | None,
         use_last_active_sensor: bool,
         cooldown_period: float | int | datetime.timedelta = 0,
+        fallback_timeout: float | int = DEFAULT_FALLBACK_TIMEOUT,
         user_min_temp: float | None = None,
         user_max_temp: float | None = None,
         max_sync_offset: float | None = None,
@@ -345,6 +353,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             self._cooldown_period = float(cooldown_period)
         else:
             self._cooldown_period = cooldown_period.total_seconds()
+        self._fallback_timeout_seconds: float = max(0.0, float(fallback_timeout) * 60.0)
+        self._fallback_timer_unsub: Callable[[], None] | None = None
         self._last_real_write_time = 0.0
         self._attr_name = name
         self._attr_unique_id = unique_id
@@ -490,6 +500,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self._initialize_missing_virtual_range_targets()
         self._enforce_hvac_mode_restrictions()
         await self._async_subscribe_to_states()
+        if self._is_in_sensor_fallback():
+            self._schedule_fallback_timer()
 
     def _initialize_missing_virtual_range_targets(self) -> None:
         """Seed missing endpoints without replacing established virtual targets."""
@@ -560,6 +572,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         if self._sensor_realign_task and not self._sensor_realign_task.done():
             self._sensor_realign_task.cancel()
         self._cancel_cooldown_timer()
+        self._cancel_fallback_timer()
         while self._unsub_listeners:
             unsubscribe = self._unsub_listeners.pop()
             unsubscribe()
@@ -595,6 +608,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             )
             self._selected_sensor_name = self._physical_sensor_name
             self._reset_fallback_recovery_state()
+            self._cancel_fallback_timer()
 
             async def _log_fallback() -> None:
                 await self.hass.services.async_call(
@@ -875,7 +889,9 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             self._last_acted_sensor_temp = None
         if is_in_fallback:
             self._reset_fallback_recovery_state()
+            self._schedule_fallback_timer()
         elif was_in_fallback:
+            self._cancel_fallback_timer()
             self._awaiting_fallback_recovery = True
             self._fallback_recovery_grace_until = (
                 time.monotonic() + POST_WRITE_GRACE_PERIOD
@@ -915,6 +931,67 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         """Clear pending recovery flag once remote control is no longer in fallback."""
         if not self._is_in_sensor_fallback():
             self._awaiting_fallback_recovery = False
+
+    def _cancel_fallback_timer(self) -> None:
+        """Cancel any pending permanent-fallback timer."""
+        if self._fallback_timer_unsub:
+            self._fallback_timer_unsub()
+            self._fallback_timer_unsub = None
+
+    def _schedule_fallback_timer(self) -> None:
+        """Schedule permanent switch to physical preset if sensor stays unavailable."""
+        if (
+            self._fallback_timeout_seconds <= 0
+            or self._fallback_timer_unsub is not None
+        ):
+            return
+        self._fallback_timer_unsub = async_call_later(
+            self.hass,
+            self._fallback_timeout_seconds,
+            self._async_commit_permanent_fallback,
+        )
+
+    @callback
+    def _async_commit_permanent_fallback(self, _now: datetime.datetime) -> None:
+        """Permanently switch to the physical preset after prolonged sensor dropout."""
+        self._fallback_timer_unsub = None
+        if not self._is_in_sensor_fallback():
+            return
+
+        dropped_sensor = self._selected_sensor_name
+        self._selected_sensor_name = self._physical_sensor_name
+        self._reset_overdrive_state()
+        self._reset_commanded_targets()
+        self._reset_fallback_recovery_state()
+        self._last_acted_sensor_temp = None
+
+        minutes = self._fallback_timeout_seconds / 60.0
+        duration_display = (
+            f"{int(minutes)} minute{'s' if int(minutes) != 1 else ''}"
+            if minutes.is_integer()
+            else f"{minutes:.1f} minutes"
+        )
+        message = (
+            f"Permanently switched to '{self._physical_sensor_name}' because "
+            f"'{dropped_sensor}' remained unavailable for {duration_display}"
+        )
+        _LOGGER.warning("%s %s", self.entity_id, message)
+
+        async def _log_permanent_fallback() -> None:
+            await self.hass.services.async_call(
+                LOGBOOK_DOMAIN,
+                LOGBOOK_SERVICE_LOG,
+                {
+                    "name": self.name,
+                    "entity_id": self.entity_id,
+                    "message": message,
+                },
+                blocking=False,
+            )
+
+        self.hass.async_create_task(_log_permanent_fallback())
+        self._schedule_target_realign(trigger_source="preset")
+        self.async_write_ha_state()
 
     @staticmethod
     def _resolve_snapped_target(
@@ -2420,6 +2497,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
         self._selected_sensor_name = preset_mode
         self._reset_fallback_recovery_state()
+        self._cancel_fallback_timer()
         # Only rebuild the virtual target if we don't yet have a stored value (e.g. very first run).
         if self._virtual_target_temperature is None:
             real_target = (

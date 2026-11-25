@@ -15,6 +15,7 @@ from custom_components.thermostat_proxy.const import (
     CONF_DEFAULT_SENSOR,
     CONF_DEFAULT_TARGET_HUMIDITY,
     CONF_DISABLE_AUTO_SWITCH,
+    CONF_FALLBACK_TIMEOUT,
     CONF_MAX_HUMIDITY_OVERCOOL,
     CONF_MAX_SYNC_OFFSET,
     CONF_MAX_TEMP,
@@ -27,6 +28,7 @@ from custom_components.thermostat_proxy.const import (
     CONF_SENSOR_CHANGE_THRESHOLD,
     CONF_SENSORS,
     CONF_THERMOSTAT,
+    DEFAULT_FALLBACK_TIMEOUT,
     DEFAULT_MAX_SYNC_OFFSET,
     DEFAULT_SENSOR_LAST_ACTIVE,
     DOMAIN,
@@ -362,11 +364,13 @@ def test_platform_schema_validation() -> None:
         "sensors": [{"name": "Remote", "entity_id": "sensor.remote"}],
         "max_humidity_overcool": 2.5,
         "default_target_humidity": 55,
+        "fallback_timeout": 0,
         "physical_target_change_behavior": "preserve_virtual_target",
     }
     validated = PLATFORM_SCHEMA(raw_config)
     assert validated["max_humidity_overcool"] == 2.5
     assert validated["default_target_humidity"] == 55
+    assert validated["fallback_timeout"] == 0
     assert validated["physical_target_change_behavior"] == "preserve_virtual_target"
 
 
@@ -402,11 +406,33 @@ def test_platform_schema_invalid_options() -> None:
             }
         )
 
+    with pytest.raises(vol.Invalid):
+        PLATFORM_SCHEMA(
+            {
+                "platform": "thermostat_proxy",
+                "thermostat": "climate.real",
+                "sensors": [{"name": "Remote", "entity_id": "sensor.remote"}],
+                "fallback_timeout": -1,
+            }
+        )
+
+    with pytest.raises(vol.Invalid):
+        PLATFORM_SCHEMA(
+            {
+                "platform": "thermostat_proxy",
+                "thermostat": "climate.real",
+                "sensors": [{"name": "Remote", "entity_id": "sensor.remote"}],
+                "fallback_timeout": 1441,
+            }
+        )
+
 
 def test_extract_entity_config_helper() -> None:
     """Test extract_entity_config helper logic directly."""
     cfg = extract_entity_config({})
     assert cfg["max_sync_offset"] == DEFAULT_MAX_SYNC_OFFSET
+    assert cfg["fallback_timeout"] == DEFAULT_FALLBACK_TIMEOUT
+    assert extract_entity_config({CONF_FALLBACK_TIMEOUT: 0})["fallback_timeout"] == 0
     assert cfg["disable_auto_switch"] is False
     assert cfg["preserve_virtual_target"] is False
     assert cfg["use_last_active_sensor"] is False
@@ -672,6 +698,23 @@ def test_extract_runtime_settings_behaviors_and_offsets() -> None:
             CONF_MIN_DUAL_TEMP_SPREAD
         ]
         == 4.0
+    )
+
+    # 3c. fallback_timeout coercion and clamping
+    assert (
+        extract_runtime_settings({})[CONF_FALLBACK_TIMEOUT] == DEFAULT_FALLBACK_TIMEOUT
+    )
+    assert (
+        extract_runtime_settings({CONF_FALLBACK_TIMEOUT: None})[CONF_FALLBACK_TIMEOUT]
+        == DEFAULT_FALLBACK_TIMEOUT
+    )
+    assert (
+        extract_runtime_settings({CONF_FALLBACK_TIMEOUT: "15.0"})[CONF_FALLBACK_TIMEOUT]
+        == 15
+    )
+    assert (
+        extract_runtime_settings({CONF_FALLBACK_TIMEOUT: -5})[CONF_FALLBACK_TIMEOUT]
+        == 0
     )
 
     # 4. default_sensor vs last active
