@@ -1,13 +1,15 @@
-"""Tests simulating scenarios in GitHub issues #31, #32, #65, and #76."""
+"""Tests simulating scenarios in GitHub issues #31, #32, #65, #76, and #81."""
 
 import time
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from custom_components.thermostat_proxy.climate import CustomThermostatEntity
+from custom_components.thermostat_proxy.const import DEFAULT_FALLBACK_TIMEOUT
 from homeassistant.components.climate import ClimateEntityFeature, HVACMode
 from homeassistant.components.climate.const import SERVICE_SET_TEMPERATURE
+from homeassistant.const import STATE_UNAVAILABLE
 from homeassistant.core import State
 
 
@@ -547,3 +549,807 @@ async def test_issue_76_realign_resumes_when_physical_thermostat_turns_on(hass):
     assert len(set_temp_calls) == 1
     assert set_temp_calls[0].args[2].get("temperature") == 24.5
     assert proxy._last_real_target_temp == 24.5
+
+
+def _issue_81_set_temp_calls(hass):
+    """Return all climate.set_temperature service calls recorded on hass."""
+    return [
+        c
+        for c in hass.services.async_call.call_args_list
+        if c.args and len(c.args) >= 2 and c.args[1] == SERVICE_SET_TEMPERATURE
+    ]
+
+
+def _create_issue_81_proxy(
+    hass,
+    *,
+    hvac_mode: HVACMode = HVACMode.HEAT,
+    real_attrs: dict,
+    remote_temp: str = "22.2",
+    disable_auto_switch: bool = True,
+    cooldown_period: int = 0,
+    sensor_change_threshold: float = 0.0,
+    fallback_timeout: int = DEFAULT_FALLBACK_TIMEOUT,
+) -> CustomThermostatEntity:
+    """Create and initialize a CustomThermostatEntity for Issue #81 tests."""
+    proxy = CustomThermostatEntity(
+        hass=hass,
+        name="Playroom Proxy",
+        real_thermostat="climate.playroom",
+        sensors=[{"name": "Remote", "entity_id": "sensor.remote"}],
+        default_sensor="Remote",
+        unique_id="issue-81",
+        physical_sensor_name="Physical Entity",
+        use_last_active_sensor=False,
+        disable_auto_switch=disable_auto_switch,
+        cooldown_period=cooldown_period,
+        sensor_change_threshold=sensor_change_threshold,
+        fallback_timeout=fallback_timeout,
+    )
+    proxy.entity_id = "climate.playroom_proxy"
+    hass.states.async_set("climate.playroom", hvac_mode, real_attrs)
+    proxy._real_state = hass.states.get("climate.playroom")
+    proxy._update_real_temperature_limits()
+    proxy._temperature_unit = "°C"
+    proxy._sensor_states["sensor.remote"] = State("sensor.remote", remote_temp)
+    proxy._sensor_precisions["sensor.remote"] = 0.1
+    proxy._update_sensor_health_from_state(
+        "sensor.remote", proxy._sensor_states["sensor.remote"]
+    )
+    proxy._selected_sensor_name = "Remote"
+    proxy.async_write_ha_state = MagicMock()
+    return proxy
+
+
+@pytest.mark.parametrize("disable_auto_switch", [True, False])
+@pytest.mark.asyncio
+async def test_issue_81_optimistic_revert_during_sensor_fallback_single_setpoint(
+    hass, disable_auto_switch
+):
+    """Stale optimistic revert during sensor fallback must not inflate virtual_target."""
+    base_attrs = {
+        "current_temperature": 30.6,
+        "temperature": 30.0,
+        "target_temp_step": 1.0,
+        "min_temp": 5.0,
+        "max_temp": 35.0,
+        "hvac_action": "idle",
+        "supported_features": (
+            ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.PRESET_MODE
+        ),
+    }
+    proxy = _create_issue_81_proxy(
+        hass,
+        real_attrs=base_attrs,
+        remote_temp="22.2",
+        disable_auto_switch=disable_auto_switch,
+    )
+    proxy._virtual_target_temperature = 22.0
+    proxy._last_real_target_temp = 30.0
+    hass.services.async_call.reset_mock()
+
+    # 1. Remote sensor goes unavailable -> fallback writes 22.0
+    sensor_event = MagicMock()
+    sensor_event.data = {
+        "entity_id": "sensor.remote",
+        "new_state": State("sensor.remote", STATE_UNAVAILABLE),
+    }
+    proxy._async_handle_sensor_state_event(sensor_event)
+    await hass.async_block_till_done()
+
+    assert proxy._is_in_sensor_fallback() is True
+    calls = _issue_81_set_temp_calls(hass)
+    assert len(calls) == 1
+    assert calls[0].args[2]["temperature"] == 22.0
+
+    # 2. Optimistic integration echo (30.0 -> 22.0) consumes pending request
+    old_state = proxy._real_state
+    optimistic_attrs = {**base_attrs, "temperature": 22.0}
+    hass.states.async_set("climate.playroom", HVACMode.HEAT, optimistic_attrs)
+    real_event = MagicMock()
+    real_event.data = {
+        "old_state": old_state,
+        "new_state": hass.states.get("climate.playroom"),
+    }
+    proxy._async_handle_real_state_event(real_event)
+    await hass.async_block_till_done()
+    assert proxy._recent_real_target_requests == []
+
+    # 3. Past 45s grace period, hub poll returns unchanged 30.0 (command dropped)
+    proxy._last_real_write_time = time.monotonic() - 120.0
+    hass.services.async_call.reset_mock()
+    old_state = proxy._real_state
+    reverted_attrs = {**base_attrs, "current_temperature": 30.5, "temperature": 30.0}
+    hass.states.async_set("climate.playroom", HVACMode.HEAT, reverted_attrs)
+    revert_event = MagicMock()
+    revert_event.data = {
+        "old_state": old_state,
+        "new_state": hass.states.get("climate.playroom"),
+    }
+    proxy._async_handle_real_state_event(revert_event)
+    await hass.async_block_till_done()
+
+    assert proxy._virtual_target_temperature == 22.0
+    assert proxy._selected_sensor_name == "Remote"
+    retry_calls = _issue_81_set_temp_calls(hass)
+    assert len(retry_calls) == 1
+    assert retry_calls[0].args[2]["temperature"] == 22.0
+
+    # 4. Physical thermostat reflects 22.0, then remote sensor recovers to 22.2
+    hass.states.async_set(
+        "climate.playroom",
+        HVACMode.HEAT,
+        {**reverted_attrs, "temperature": 22.0},
+    )
+    proxy._real_state = hass.states.get("climate.playroom")
+    proxy._last_real_target_temp = 22.0
+    hass.services.async_call.reset_mock()
+
+    recovery_event = MagicMock()
+    recovery_event.data = {
+        "entity_id": "sensor.remote",
+        "new_state": State("sensor.remote", "22.2"),
+    }
+    proxy._async_handle_sensor_state_event(recovery_event)
+    await hass.async_block_till_done()
+
+    assert proxy._virtual_target_temperature == 22.0
+    assert proxy._selected_sensor_name == "Remote"
+    assert proxy._is_in_sensor_fallback() is False
+    assert proxy._awaiting_fallback_recovery is False
+    recovery_calls = _issue_81_set_temp_calls(hass)
+    assert len(recovery_calls) == 1
+    assert recovery_calls[0].args[2]["temperature"] == 30.0
+
+
+@pytest.mark.parametrize("disable_auto_switch", [True, False])
+@pytest.mark.asyncio
+async def test_issue_81_optimistic_revert_during_sensor_fallback_dual_setpoint(
+    hass, disable_auto_switch
+):
+    """Stale optimistic revert in dual-setpoint fallback must not inflate targets."""
+    base_attrs = {
+        "current_temperature": 28.0,
+        "target_temp_low": 28.0,
+        "target_temp_high": 32.0,
+        "target_temp_step": 1.0,
+        "min_temp": 10.0,
+        "max_temp": 35.0,
+        "hvac_action": "idle",
+        "supported_features": (
+            ClimateEntityFeature.TARGET_TEMPERATURE
+            | ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
+            | ClimateEntityFeature.PRESET_MODE
+        ),
+    }
+    proxy = _create_issue_81_proxy(
+        hass,
+        hvac_mode=HVACMode.HEAT_COOL,
+        real_attrs=base_attrs,
+        remote_temp="20.0",
+        disable_auto_switch=disable_auto_switch,
+    )
+    proxy._virtual_target_temperature_low = 20.0
+    proxy._virtual_target_temperature_high = 24.0
+    proxy._last_real_target_temp_low = 28.0
+    proxy._last_real_target_temp_high = 32.0
+    hass.services.async_call.reset_mock()
+
+    # 1. Sensor goes unavailable -> fallback writes low=20.0, high=24.0
+    sensor_event = MagicMock()
+    sensor_event.data = {
+        "entity_id": "sensor.remote",
+        "new_state": State("sensor.remote", STATE_UNAVAILABLE),
+    }
+    proxy._async_handle_sensor_state_event(sensor_event)
+    await hass.async_block_till_done()
+
+    calls = _issue_81_set_temp_calls(hass)
+    assert len(calls) == 1
+    assert calls[0].args[2]["target_temp_low"] == 20.0
+    assert calls[0].args[2]["target_temp_high"] == 24.0
+
+    # 2. Optimistic state update consumes both pending requests
+    old_state = proxy._real_state
+    hass.states.async_set(
+        "climate.playroom",
+        HVACMode.HEAT_COOL,
+        {**base_attrs, "target_temp_low": 20.0, "target_temp_high": 24.0},
+    )
+    real_event = MagicMock()
+    real_event.data = {
+        "old_state": old_state,
+        "new_state": hass.states.get("climate.playroom"),
+    }
+    proxy._async_handle_real_state_event(real_event)
+    await hass.async_block_till_done()
+    assert proxy._recent_real_target_requests == []
+
+    # 3. Past grace period, poll reverts 20.0/24.0 -> 28.0/32.0
+    proxy._last_real_write_time = time.monotonic() - 120.0
+    hass.services.async_call.reset_mock()
+    old_state = proxy._real_state
+    hass.states.async_set("climate.playroom", HVACMode.HEAT_COOL, base_attrs)
+    revert_event = MagicMock()
+    revert_event.data = {
+        "old_state": old_state,
+        "new_state": hass.states.get("climate.playroom"),
+    }
+    proxy._async_handle_real_state_event(revert_event)
+    await hass.async_block_till_done()
+
+    assert proxy._virtual_target_temperature_low == 20.0
+    assert proxy._virtual_target_temperature_high == 24.0
+    assert proxy._selected_sensor_name == "Remote"
+    retry_calls = _issue_81_set_temp_calls(hass)
+    assert len(retry_calls) == 1
+    assert retry_calls[0].args[2]["target_temp_low"] == 20.0
+    assert retry_calls[0].args[2]["target_temp_high"] == 24.0
+    proxy._cancel_fallback_timer()
+
+
+@pytest.mark.asyncio
+async def test_issue_81_post_recovery_cooldown_suppresses_stale_revert(hass):
+    """Stale revert arriving after sensor recovery during cooldown must be ignored."""
+    base_attrs = {
+        "current_temperature": 30.6,
+        "temperature": 30.0,
+        "target_temp_step": 1.0,
+        "min_temp": 5.0,
+        "max_temp": 35.0,
+        "hvac_action": "idle",
+        "supported_features": (
+            ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.PRESET_MODE
+        ),
+    }
+    proxy = _create_issue_81_proxy(
+        hass,
+        real_attrs=base_attrs,
+        remote_temp="22.2",
+        disable_auto_switch=True,
+        cooldown_period=180,
+    )
+    proxy._virtual_target_temperature = 22.0
+    proxy._last_real_target_temp = 30.0
+    hass.services.async_call.reset_mock()
+
+    # 1. Sensor unavailable -> fallback writes 22.0
+    sensor_event = MagicMock()
+    sensor_event.data = {
+        "entity_id": "sensor.remote",
+        "new_state": State("sensor.remote", STATE_UNAVAILABLE),
+    }
+    proxy._async_handle_sensor_state_event(sensor_event)
+    await hass.async_block_till_done()
+
+    # 2. Optimistic update sets real temperature to 22.0 (consumes pending)
+    old_state = proxy._real_state
+    hass.states.async_set(
+        "climate.playroom",
+        HVACMode.HEAT,
+        {**base_attrs, "temperature": 22.0},
+    )
+    real_event = MagicMock()
+    real_event.data = {
+        "old_state": old_state,
+        "new_state": hass.states.get("climate.playroom"),
+    }
+    proxy._async_handle_real_state_event(real_event)
+    await hass.async_block_till_done()
+    assert proxy._recent_real_target_requests == []
+
+    # 3. Past 45s grace period, still within 180s cooldown, sensor recovers
+    proxy._last_real_write_time = time.monotonic() - 110.0
+    recovery_event = MagicMock()
+    recovery_event.data = {
+        "entity_id": "sensor.remote",
+        "new_state": State("sensor.remote", "22.2"),
+    }
+    proxy._async_handle_sensor_state_event(recovery_event)
+    await hass.async_block_till_done()
+
+    assert proxy._awaiting_fallback_recovery is True
+    assert proxy._cooldown_timer_unsub is not None
+
+    # 4. Stale revert poll (22.0 -> 30.0) arrives before cooldown expires
+    old_state = proxy._real_state
+    hass.states.async_set(
+        "climate.playroom",
+        HVACMode.HEAT,
+        {**base_attrs, "current_temperature": 30.5, "temperature": 30.0},
+    )
+    revert_event = MagicMock()
+    revert_event.data = {
+        "old_state": old_state,
+        "new_state": hass.states.get("climate.playroom"),
+    }
+    proxy._async_handle_real_state_event(revert_event)
+    await hass.async_block_till_done()
+
+    assert proxy._virtual_target_temperature == 22.0
+    assert proxy._selected_sensor_name == "Remote"
+
+    # 5. Cooldown expires and retry runs
+    proxy._last_real_write_time = time.monotonic() - 200.0
+    proxy._async_cooldown_retry(None)
+    await hass.async_block_till_done()
+
+    assert proxy._awaiting_fallback_recovery is False
+    assert proxy._virtual_target_temperature == 22.0
+
+
+@pytest.mark.asyncio
+async def test_issue_81_explicit_physical_preset_still_syncs_external_changes(hass):
+    """Explicitly selecting Physical Entity must still sync manual target changes."""
+    base_attrs = {
+        "current_temperature": 22.0,
+        "temperature": 22.0,
+        "target_temp_step": 1.0,
+        "min_temp": 5.0,
+        "max_temp": 35.0,
+        "supported_features": (
+            ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.PRESET_MODE
+        ),
+    }
+    proxy = _create_issue_81_proxy(
+        hass,
+        real_attrs=base_attrs,
+        remote_temp="22.0",
+        disable_auto_switch=False,
+    )
+    proxy._selected_sensor_name = "Physical Entity"
+    proxy._virtual_target_temperature = 22.0
+    proxy._last_real_target_temp = 22.0
+    proxy._last_real_write_time = time.monotonic() - 120.0
+
+    assert proxy._is_in_sensor_fallback() is False
+
+    old_state = proxy._real_state
+    hass.states.async_set(
+        "climate.playroom",
+        HVACMode.HEAT,
+        {**base_attrs, "temperature": 25.0},
+    )
+    event = MagicMock()
+    event.data = {
+        "old_state": old_state,
+        "new_state": hass.states.get("climate.playroom"),
+    }
+    proxy._async_handle_real_state_event(event)
+    await hass.async_block_till_done()
+
+    assert proxy._is_in_sensor_fallback() is False
+    assert proxy._virtual_target_temperature == 25.0
+
+
+@pytest.mark.asyncio
+async def test_issue_81_manual_external_change_resumes_after_recovery_grace(hass):
+    """Manual physical target changes must sync normally once recovery grace expires."""
+    base_attrs = {
+        "current_temperature": 30.6,
+        "temperature": 30.0,
+        "target_temp_step": 1.0,
+        "min_temp": 5.0,
+        "max_temp": 35.0,
+        "hvac_action": "idle",
+        "supported_features": (
+            ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.PRESET_MODE
+        ),
+    }
+    proxy = _create_issue_81_proxy(
+        hass,
+        real_attrs=base_attrs,
+        remote_temp="22.2",
+        disable_auto_switch=True,
+    )
+    proxy._virtual_target_temperature = 22.0
+    proxy._last_real_target_temp = 30.0
+
+    # Fall back then recover
+    unavailable_event = MagicMock()
+    unavailable_event.data = {
+        "entity_id": "sensor.remote",
+        "new_state": State("sensor.remote", STATE_UNAVAILABLE),
+    }
+    proxy._async_handle_sensor_state_event(unavailable_event)
+    await hass.async_block_till_done()
+
+    recovery_event = MagicMock()
+    recovery_event.data = {
+        "entity_id": "sensor.remote",
+        "new_state": State("sensor.remote", "22.2"),
+    }
+    proxy._async_handle_sensor_state_event(recovery_event)
+    await hass.async_block_till_done()
+
+    # Expire both post-write and post-recovery grace periods
+    proxy._last_real_write_time = time.monotonic() - 120.0
+    proxy._fallback_recovery_grace_until = time.monotonic() - 120.0
+    proxy._recent_real_target_requests = []
+
+    old_state = proxy._real_state
+    hass.states.async_set(
+        "climate.playroom",
+        HVACMode.HEAT,
+        {**base_attrs, "temperature": 32.0},
+    )
+    manual_event = MagicMock()
+    manual_event.data = {
+        "old_state": old_state,
+        "new_state": hass.states.get("climate.playroom"),
+    }
+    proxy._async_handle_real_state_event(manual_event)
+    await hass.async_block_till_done()
+
+    assert proxy._virtual_target_temperature == 24.0
+
+
+@pytest.mark.asyncio
+async def test_issue_81_fallback_and_recovery_bypass_sensor_change_threshold(hass):
+    """Fallback and recovery transitions must reset _last_acted_sensor_temp."""
+    base_attrs = {
+        "current_temperature": 22.4,
+        "temperature": 23.5,
+        "target_temp_step": 0.5,
+        "min_temp": 5.0,
+        "max_temp": 35.0,
+        "hvac_action": "heating",
+        "supported_features": (
+            ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.PRESET_MODE
+        ),
+    }
+    proxy = _create_issue_81_proxy(
+        hass,
+        hvac_mode=HVACMode.HEAT,
+        real_attrs=base_attrs,
+        remote_temp="22.1",
+        disable_auto_switch=True,
+        sensor_change_threshold=1.0,
+    )
+    proxy._virtual_target_temperature = 23.0
+    proxy._last_acted_sensor_temp = 22.1
+    hass.services.async_call.reset_mock()
+
+    # Sensor goes unavailable; abs(22.4 - 22.1) = 0.3 < threshold (1.0)
+    unavailable_event = MagicMock()
+    unavailable_event.data = {
+        "entity_id": "sensor.remote",
+        "new_state": State("sensor.remote", STATE_UNAVAILABLE),
+    }
+    proxy._async_handle_sensor_state_event(unavailable_event)
+    await hass.async_block_till_done()
+
+    fallback_calls = _issue_81_set_temp_calls(hass)
+    assert len(fallback_calls) == 1
+    assert fallback_calls[0].args[2]["temperature"] == 23.0
+
+    # Update physical thermostat to 23.0, then recover sensor; abs(22.1 - 22.4) < 1.0
+    hass.states.async_set(
+        "climate.playroom",
+        HVACMode.HEAT,
+        {**base_attrs, "temperature": 23.0},
+    )
+    proxy._real_state = hass.states.get("climate.playroom")
+    hass.services.async_call.reset_mock()
+
+    recovery_event = MagicMock()
+    recovery_event.data = {
+        "entity_id": "sensor.remote",
+        "new_state": State("sensor.remote", "22.1"),
+    }
+    proxy._async_handle_sensor_state_event(recovery_event)
+    await hass.async_block_till_done()
+
+    recovery_calls = _issue_81_set_temp_calls(hass)
+    assert len(recovery_calls) == 1
+    assert recovery_calls[0].args[2]["temperature"] == 23.5
+    assert proxy._awaiting_fallback_recovery is False
+
+
+@pytest.mark.asyncio
+async def test_issue_81_inflight_fallback_write_does_not_clear_recovery_flag(hass):
+    """Sensor recovery mid-fallback write must not clear _awaiting_fallback_recovery."""
+    base_attrs = {
+        "current_temperature": 30.6,
+        "temperature": 30.0,
+        "target_temp_step": 1.0,
+        "min_temp": 5.0,
+        "max_temp": 35.0,
+        "hvac_action": "idle",
+        "supported_features": (
+            ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.PRESET_MODE
+        ),
+    }
+    proxy = _create_issue_81_proxy(
+        hass,
+        hvac_mode=HVACMode.HEAT,
+        real_attrs=base_attrs,
+        remote_temp="22.2",
+        disable_auto_switch=True,
+    )
+    proxy._virtual_target_temperature = 22.0
+    proxy._last_real_target_temp = 30.0
+
+    # Enter fallback directly
+    proxy._sensor_states["sensor.remote"] = State("sensor.remote", STATE_UNAVAILABLE)
+    proxy._update_sensor_health_from_state(
+        "sensor.remote", proxy._sensor_states["sensor.remote"]
+    )
+    assert proxy._is_in_sensor_fallback() is True
+
+    proxy._schedule_target_realign = MagicMock()
+
+    async def _recover_during_fallback_write(domain, service, data=None, **kwargs):
+        if (
+            domain == "climate"
+            and service == SERVICE_SET_TEMPERATURE
+            and data
+            and data.get("temperature") == 22.0
+        ):
+            recovery_event = MagicMock()
+            recovery_event.data = {
+                "entity_id": "sensor.remote",
+                "new_state": State("sensor.remote", "22.2"),
+            }
+            proxy._async_handle_sensor_state_event(recovery_event)
+
+    hass.services.async_call.side_effect = _recover_during_fallback_write
+
+    await proxy._async_realign_real_target_from_sensor(trigger_source="sensor")
+
+    assert proxy._is_in_sensor_fallback() is False
+    assert proxy._awaiting_fallback_recovery is True
+
+
+@pytest.mark.asyncio
+async def test_issue_81_fallback_timeout_commits_permanent_switch_and_prevents_late_restore(
+    hass,
+):
+    """After fallback_timeout expires, proxy permanently switches to physical preset."""
+    base_attrs = {
+        "current_temperature": 30.6,
+        "temperature": 30.0,
+        "target_temp_step": 1.0,
+        "min_temp": 5.0,
+        "max_temp": 35.0,
+        "hvac_action": "idle",
+        "supported_features": (
+            ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.PRESET_MODE
+        ),
+    }
+    proxy = _create_issue_81_proxy(
+        hass,
+        real_attrs=base_attrs,
+        remote_temp="22.2",
+        disable_auto_switch=False,
+    )
+    proxy._virtual_target_temperature = 22.0
+    proxy._last_real_target_temp = 30.0
+    proxy._last_acted_sensor_temp = 22.2
+
+    scheduled: list[tuple[float, object]] = []
+    mock_unsub = MagicMock()
+
+    def _fake_call_later(_hass, delay, action):
+        scheduled.append((delay, action))
+        return mock_unsub
+
+    with patch(
+        "custom_components.thermostat_proxy.climate.async_call_later",
+        side_effect=_fake_call_later,
+    ):
+        unavailable_event = MagicMock()
+        unavailable_event.data = {
+            "entity_id": "sensor.remote",
+            "new_state": State("sensor.remote", STATE_UNAVAILABLE),
+        }
+        proxy._async_handle_sensor_state_event(unavailable_event)
+        await hass.async_block_till_done()
+
+    assert len(scheduled) == 1
+    assert scheduled[0][0] == DEFAULT_FALLBACK_TIMEOUT * 60.0
+    assert proxy._fallback_timer_unsub is mock_unsub
+
+    hass.services.async_call.reset_mock()
+    proxy._async_commit_permanent_fallback(None)
+    await hass.async_block_till_done()
+
+    assert proxy._selected_sensor_name == "Physical Entity"
+    assert proxy.preset_mode == "Physical Entity"
+    assert proxy._is_in_sensor_fallback() is False
+    assert proxy._fallback_timer_unsub is None
+    assert proxy._last_acted_sensor_temp == 30.6
+
+    logbook_messages = [
+        c.args[2]["message"]
+        for c in hass.services.async_call.call_args_list
+        if c.args and len(c.args) >= 3 and c.args[0] == "logbook"
+    ]
+    assert any(
+        "Permanently switched to 'Physical Entity' because 'Remote' remained unavailable for 15 minutes"
+        in msg
+        for msg in logbook_messages
+    )
+
+    # Late sensor recovery hours later must NOT jump back to Remote
+    recovery_event = MagicMock()
+    recovery_event.data = {
+        "entity_id": "sensor.remote",
+        "new_state": State("sensor.remote", "22.2"),
+    }
+    proxy._async_handle_sensor_state_event(recovery_event)
+    await hass.async_block_till_done()
+
+    assert proxy._selected_sensor_name == "Physical Entity"
+    assert proxy.preset_mode == "Physical Entity"
+
+    # Physical dial adjustments now sync normally
+    proxy._last_real_write_time = time.monotonic() - 120.0
+    proxy._recent_real_target_requests = []
+    hass.states.async_set(
+        "climate.playroom",
+        HVACMode.HEAT,
+        {**base_attrs, "temperature": 22.0},
+    )
+    proxy._real_state = hass.states.get("climate.playroom")
+    old_state = proxy._real_state
+    hass.states.async_set(
+        "climate.playroom",
+        HVACMode.HEAT,
+        {**base_attrs, "temperature": 25.0},
+    )
+    dial_event = MagicMock()
+    dial_event.data = {
+        "old_state": old_state,
+        "new_state": hass.states.get("climate.playroom"),
+    }
+    proxy._async_handle_real_state_event(dial_event)
+    await hass.async_block_till_done()
+
+    assert proxy._virtual_target_temperature == 25.0
+
+
+@pytest.mark.asyncio
+async def test_issue_81_fallback_timeout_cancelled_on_recovery_preset_switch_and_remove(
+    hass,
+):
+    """Fallback timer is cancelled on recovery, manual preset change, and unload."""
+    base_attrs = {
+        "current_temperature": 30.6,
+        "temperature": 30.0,
+        "target_temp_step": 1.0,
+        "min_temp": 5.0,
+        "max_temp": 35.0,
+        "supported_features": (
+            ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.PRESET_MODE
+        ),
+    }
+    proxy = _create_issue_81_proxy(hass, real_attrs=base_attrs, remote_temp="22.2")
+    proxy._virtual_target_temperature = 22.0
+
+    # (a) Sensor recovers before timeout
+    unsub_a = MagicMock()
+    with patch(
+        "custom_components.thermostat_proxy.climate.async_call_later",
+        return_value=unsub_a,
+    ):
+        ev_down = MagicMock()
+        ev_down.data = {
+            "entity_id": "sensor.remote",
+            "new_state": State("sensor.remote", STATE_UNAVAILABLE),
+        }
+        proxy._async_handle_sensor_state_event(ev_down)
+    assert proxy._fallback_timer_unsub is unsub_a
+
+    ev_up = MagicMock()
+    ev_up.data = {
+        "entity_id": "sensor.remote",
+        "new_state": State("sensor.remote", "22.2"),
+    }
+    proxy._async_handle_sensor_state_event(ev_up)
+    await hass.async_block_till_done()
+    unsub_a.assert_called_once()
+    assert proxy._fallback_timer_unsub is None
+
+    # (b) Explicit preset switch cancels timer
+    unsub_b = MagicMock()
+    with patch(
+        "custom_components.thermostat_proxy.climate.async_call_later",
+        return_value=unsub_b,
+    ):
+        proxy._async_handle_sensor_state_event(ev_down)
+    assert proxy._fallback_timer_unsub is unsub_b
+
+    await proxy.async_set_preset_mode("Physical Entity")
+    unsub_b.assert_called_once()
+    assert proxy._fallback_timer_unsub is None
+
+    # (c) Unload cancels timer
+    proxy._selected_sensor_name = "Remote"
+    proxy._sensor_states["sensor.remote"] = State("sensor.remote", "22.2")
+    unsub_c = MagicMock()
+    with patch(
+        "custom_components.thermostat_proxy.climate.async_call_later",
+        return_value=unsub_c,
+    ):
+        proxy._async_handle_sensor_state_event(ev_down)
+    assert proxy._fallback_timer_unsub is unsub_c
+
+    await proxy.async_will_remove_from_hass()
+    unsub_c.assert_called_once()
+    assert proxy._fallback_timer_unsub is None
+
+
+@pytest.mark.asyncio
+async def test_issue_81_fallback_timeout_zero_disables_permanent_switch(hass):
+    """Setting fallback_timeout=0 disables permanent switching."""
+    base_attrs = {
+        "current_temperature": 30.6,
+        "temperature": 30.0,
+        "target_temp_step": 1.0,
+        "min_temp": 5.0,
+        "max_temp": 35.0,
+        "supported_features": (
+            ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.PRESET_MODE
+        ),
+    }
+    proxy = _create_issue_81_proxy(
+        hass,
+        real_attrs=base_attrs,
+        remote_temp="22.2",
+        fallback_timeout=0,
+    )
+    proxy._virtual_target_temperature = 22.0
+
+    ev_down = MagicMock()
+    ev_down.data = {
+        "entity_id": "sensor.remote",
+        "new_state": State("sensor.remote", STATE_UNAVAILABLE),
+    }
+    proxy._async_handle_sensor_state_event(ev_down)
+    await hass.async_block_till_done()
+
+    assert proxy._is_in_sensor_fallback() is True
+    assert proxy._fallback_timer_unsub is None
+
+
+@pytest.mark.asyncio
+async def test_issue_81_fallback_timeout_scheduled_at_startup_when_sensor_unavailable(
+    hass,
+):
+    """If active remote sensor is already unavailable at startup, schedule fallback timer."""
+    hass.states.async_set(
+        "climate.playroom",
+        HVACMode.HEAT,
+        {
+            "current_temperature": 30.6,
+            "temperature": 30.0,
+            "target_temp_step": 1.0,
+            "min_temp": 5.0,
+            "max_temp": 35.0,
+            "supported_features": (
+                ClimateEntityFeature.TARGET_TEMPERATURE
+                | ClimateEntityFeature.PRESET_MODE
+            ),
+        },
+    )
+    hass.states.async_set("sensor.remote", STATE_UNAVAILABLE)
+
+    proxy = CustomThermostatEntity(
+        hass=hass,
+        name="Playroom Proxy",
+        real_thermostat="climate.playroom",
+        sensors=[{"name": "Remote", "entity_id": "sensor.remote"}],
+        default_sensor="Remote",
+        unique_id="issue-81-startup",
+        physical_sensor_name="Physical Entity",
+        use_last_active_sensor=False,
+    )
+    proxy.entity_id = "climate.playroom_proxy"
+
+    await proxy.async_added_to_hass()
+    assert proxy._is_in_sensor_fallback() is True
+    assert proxy._fallback_timer_unsub is not None
+
+    await proxy.async_will_remove_from_hass()
+    assert proxy._fallback_timer_unsub is None

@@ -12,6 +12,7 @@ from .const import (
     CONF_DEFAULT_SENSOR,
     CONF_DEFAULT_TARGET_HUMIDITY,
     CONF_DISABLE_AUTO_SWITCH,
+    CONF_FALLBACK_TIMEOUT,
     CONF_MAX_HUMIDITY_OVERCOOL,
     CONF_MAX_SYNC_OFFSET,
     CONF_MAX_TEMP,
@@ -26,6 +27,7 @@ from .const import (
     CONF_USE_LAST_ACTIVE_SENSOR,
     DEFAULT_COOLDOWN_PERIOD,
     DEFAULT_DISABLE_AUTO_SWITCH,
+    DEFAULT_FALLBACK_TIMEOUT,
     DEFAULT_MAX_HUMIDITY_OVERCOOL,
     DEFAULT_MAX_SYNC_OFFSET,
     DEFAULT_OVERDRIVE_OFFSET,
@@ -52,6 +54,7 @@ class EntityConfig(TypedDict):
     disable_auto_switch: bool
     preserve_virtual_target: bool
     cooldown_period: float | int | datetime.timedelta
+    fallback_timeout: int
     user_min_temp: float | None
     user_max_temp: float | None
     max_sync_offset: float | None
@@ -115,12 +118,19 @@ def extract_runtime_settings(config: Mapping[str, Any]) -> dict[str, Any]:
 
     raw_max_sync_offset = config.get(CONF_MAX_SYNC_OFFSET, DEFAULT_MAX_SYNC_OFFSET)
     max_sync_offset = _nonzero_float_or_none(raw_max_sync_offset)
+    raw_fallback_timeout = config.get(CONF_FALLBACK_TIMEOUT)
+    fallback_timeout = (
+        max(0, int(float(raw_fallback_timeout)))
+        if raw_fallback_timeout is not None
+        else DEFAULT_FALLBACK_TIMEOUT
+    )
 
     return {
         CONF_PHYSICAL_TEMPERATURE_SENSOR: config.get(CONF_PHYSICAL_TEMPERATURE_SENSOR),
         CONF_DEFAULT_SENSOR: default_sensor,
         CONF_USE_LAST_ACTIVE_SENSOR: use_last_active_sensor,
         CONF_COOLDOWN_PERIOD: config.get(CONF_COOLDOWN_PERIOD, DEFAULT_COOLDOWN_PERIOD),
+        CONF_FALLBACK_TIMEOUT: fallback_timeout,
         CONF_MIN_TEMP: _nonzero_float_or_none(config.get(CONF_MIN_TEMP)),
         CONF_MAX_TEMP: _nonzero_float_or_none(config.get(CONF_MAX_TEMP)),
         CONF_MAX_SYNC_OFFSET: max_sync_offset,
@@ -178,6 +188,7 @@ def extract_entity_config(
         "disable_auto_switch": settings[CONF_DISABLE_AUTO_SWITCH],
         "preserve_virtual_target": settings[CONF_PRESERVE_VIRTUAL_TARGET],
         "cooldown_period": settings[CONF_COOLDOWN_PERIOD],
+        "fallback_timeout": settings[CONF_FALLBACK_TIMEOUT],
         "user_min_temp": settings[CONF_MIN_TEMP],
         "user_max_temp": settings[CONF_MAX_TEMP],
         "max_sync_offset": settings[CONF_MAX_SYNC_OFFSET],
