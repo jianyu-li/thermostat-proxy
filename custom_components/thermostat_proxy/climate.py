@@ -433,6 +433,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self._last_commanded_real_target_high: float | None = None
         self._last_snapped_real_target_low: float | None = None
         self._last_snapped_real_target_high: float | None = None
+        self._awaiting_fallback_recovery: bool = False
+        self._fallback_recovery_grace_until: float = 0.0
 
     def _log_debug(self, msg: str, *args: Any) -> None:
         """Log diagnostic information."""
@@ -592,6 +594,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 self._physical_sensor_name,
             )
             self._selected_sensor_name = self._physical_sensor_name
+            self._reset_fallback_recovery_state()
 
             async def _log_fallback() -> None:
                 await self.hass.services.async_call(
@@ -677,6 +680,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         if mode_changed:
             self._reset_overdrive_state()
             self._reset_commanded_targets()
+            self._reset_fallback_recovery_state()
 
         # Handle mode transition target sync between dual and single setpoint modes
         if mode_changed and old_state is not None:
@@ -750,13 +754,23 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                         "Thermostat mode changed or returned to active state; updated target to %s without triggering external change",
                         real_target,
                     )
-                elif is_recent_write:
-                    if self._last_commanded_real_target is not None and math.isclose(
+                elif self._should_suppress_external_target_sync():
+                    self._last_snapped_real_target = self._resolve_snapped_target(
                         real_target,
                         self._last_commanded_real_target,
-                        abs_tol=loose_tolerance,
-                    ):
-                        self._last_snapped_real_target = real_target
+                        loose_tolerance,
+                    )
+                    self._log_debug(
+                        "Real target %s changed during automatic sensor fallback or recovery - ignoring potential external change",
+                        real_target,
+                    )
+                elif is_recent_write:
+                    self._last_snapped_real_target = self._resolve_snapped_target(
+                        real_target,
+                        self._last_commanded_real_target,
+                        loose_tolerance,
+                        default=self._last_snapped_real_target,
+                    )
                     self._log_debug(
                         "Real target %s changed during post-write grace period (%.1fs < %.1fs) - ignoring potential echo",
                         real_target,
@@ -821,6 +835,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
 
         if new_state.state in (HVACMode.OFF, STATE_UNAVAILABLE, STATE_UNKNOWN):
             self._cancel_cooldown_timer()
+            self._reset_fallback_recovery_state()
         else:
             self._schedule_target_realign(trigger_source="real")
         self.async_write_ha_state()
@@ -850,10 +865,21 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             new_state.state if new_state else None,
         )
 
+        was_in_fallback = self._is_in_sensor_fallback()
         if entity_id:
             self._sensor_states[entity_id] = new_state
             self._sensor_precisions[entity_id] = self._infer_sensor_precision(new_state)
         self._update_sensor_health_from_state(entity_id, new_state)
+        is_in_fallback = self._is_in_sensor_fallback()
+        if is_in_fallback != was_in_fallback:
+            self._last_acted_sensor_temp = None
+        if is_in_fallback:
+            self._reset_fallback_recovery_state()
+        elif was_in_fallback:
+            self._awaiting_fallback_recovery = True
+            self._fallback_recovery_grace_until = (
+                time.monotonic() + POST_WRITE_GRACE_PERIOD
+            )
         if self._is_active_sensor_entity(entity_id):
             self._schedule_target_realign(trigger_source="sensor")
         self.async_write_ha_state()
@@ -866,6 +892,44 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
     def _is_remote_sensor_controlling(self) -> bool:
         """Return True if a healthy remote sensor preset is actively controlling."""
         return self.preset_mode != self._physical_sensor_name
+
+    def _is_in_sensor_fallback(self) -> bool:
+        """Return True when a remote preset is selected but falling back to physical."""
+        return (
+            not self._is_physical_sensor_preset_selected()
+            and not self._is_remote_sensor_controlling()
+        )
+
+    def _should_suppress_external_target_sync(self) -> bool:
+        """Return True if external target detection should be suppressed for fallback."""
+        if self._is_in_sensor_fallback() or self._awaiting_fallback_recovery:
+            return True
+        return time.monotonic() < self._fallback_recovery_grace_until
+
+    def _reset_fallback_recovery_state(self) -> None:
+        """Clear pending post-fallback recovery suppression state."""
+        self._awaiting_fallback_recovery = False
+        self._fallback_recovery_grace_until = 0.0
+
+    def _clear_awaiting_fallback_recovery_if_active(self) -> None:
+        """Clear pending recovery flag once remote control is no longer in fallback."""
+        if not self._is_in_sensor_fallback():
+            self._awaiting_fallback_recovery = False
+
+    @staticmethod
+    def _resolve_snapped_target(
+        real_val: float,
+        commanded_val: float | None,
+        loose_tolerance: float,
+        *,
+        default: float | None = None,
+    ) -> float | None:
+        """Return real_val when within loose_tolerance of commanded_val, else default."""
+        if commanded_val is not None and math.isclose(
+            real_val, commanded_val, abs_tol=loose_tolerance
+        ):
+            return real_val
+        return default
 
     def _reset_overdrive_state(self) -> None:
         """Reset all active overdrive flags."""
@@ -1121,28 +1185,42 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         if was_not_controlling:
             return
 
-        time_since_write = time.monotonic() - self._last_real_write_time
-        if time_since_write < POST_WRITE_GRACE_PERIOD:
-            if (
-                real_low is not None
-                and self._last_commanded_real_target_low is not None
-                and math.isclose(
+        if self._should_suppress_external_target_sync():
+            if real_low is not None:
+                self._last_snapped_real_target_low = self._resolve_snapped_target(
                     real_low,
                     self._last_commanded_real_target_low,
-                    abs_tol=loose_tolerance,
+                    loose_tolerance,
                 )
-            ):
-                self._last_snapped_real_target_low = real_low
-            if (
-                real_high is not None
-                and self._last_commanded_real_target_high is not None
-                and math.isclose(
+            if real_high is not None:
+                self._last_snapped_real_target_high = self._resolve_snapped_target(
                     real_high,
                     self._last_commanded_real_target_high,
-                    abs_tol=loose_tolerance,
+                    loose_tolerance,
                 )
-            ):
-                self._last_snapped_real_target_high = real_high
+            self._log_debug(
+                "Dual real targets (low=%s, high=%s) changed during automatic sensor fallback or recovery - ignoring potential external change",
+                real_low,
+                real_high,
+            )
+            return
+
+        time_since_write = time.monotonic() - self._last_real_write_time
+        if time_since_write < POST_WRITE_GRACE_PERIOD:
+            if real_low is not None:
+                self._last_snapped_real_target_low = self._resolve_snapped_target(
+                    real_low,
+                    self._last_commanded_real_target_low,
+                    loose_tolerance,
+                    default=self._last_snapped_real_target_low,
+                )
+            if real_high is not None:
+                self._last_snapped_real_target_high = self._resolve_snapped_target(
+                    real_high,
+                    self._last_commanded_real_target_high,
+                    loose_tolerance,
+                    default=self._last_snapped_real_target_high,
+                )
             return
 
         abs_tol = (step_size * 0.5) if step_size else EXTERNAL_CHANGE_TOLERANCE
@@ -2059,6 +2137,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             raise
 
         self._cancel_cooldown_timer()
+        self._reset_fallback_recovery_state()
         if new_virtual_high is not None:
             self._virtual_target_temperature_high = new_virtual_high
         if new_virtual_low is not None:
@@ -2196,6 +2275,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 raise
 
             self._cancel_cooldown_timer()
+            self._reset_fallback_recovery_state()
             self._virtual_target_temperature = constrained_target
             self.async_write_ha_state()
 
@@ -2339,6 +2419,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     )
 
         self._selected_sensor_name = preset_mode
+        self._reset_fallback_recovery_state()
         # Only rebuild the virtual target if we don't yet have a stored value (e.g. very first run).
         if self._virtual_target_temperature is None:
             real_target = (
@@ -2723,12 +2804,14 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                 self._virtual_target_temperature_low is None
                 and self._virtual_target_temperature_high is None
             ):
+                self._clear_awaiting_fallback_recovery_if_active()
                 return
         elif self._virtual_target_temperature is None:
             self._virtual_target_temperature = self._apply_target_constraints(
                 self._get_real_target_temperature()
             )
             if self._virtual_target_temperature is None:
+                self._clear_awaiting_fallback_recovery_if_active()
                 return
 
         if (
@@ -2738,6 +2821,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             in (HVACMode.OFF, STATE_UNAVAILABLE, STATE_UNKNOWN)
         ):
             self._cancel_cooldown_timer()
+            self._reset_fallback_recovery_state()
             self._log_debug(
                 "Skipping target realignment because physical thermostat is off or unavailable (state=%s)",
                 self._real_state.state if self._real_state else None,
@@ -2749,6 +2833,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             if active_sensor_temp is not None and self._should_skip_sensor_realign(
                 active_sensor_temp, trigger_source
             ):
+                self._clear_awaiting_fallback_recovery_if_active()
                 return
 
         now = time.monotonic()
@@ -2778,233 +2863,244 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
         self._cancel_cooldown_timer()
 
         async with self._command_lock:
-            sensor_temp = self._get_active_sensor_temperature()
-            real_current = self._get_real_current_temperature()
-
-            self._log_debug(
-                "_async_realign_real_target_from_sensor: virtual_target=%s, sensor_temp=%s, real_current=%s",
-                self._virtual_target_temperature,
-                sensor_temp,
-                real_current,
-            )
-
-            if sensor_temp is None or real_current is None:
-                return
-
-            if self._should_skip_sensor_realign(sensor_temp, trigger_source):
-                return
-
-            self._last_acted_sensor_temp = sensor_temp
-
-            if self.is_range_mode:
-                await self._async_realign_dual_targets(
-                    sensor_temp, real_current, trigger_source=trigger_source
+            started_in_fallback = self._is_in_sensor_fallback()
+            try:
+                await self._async_realign_real_target_locked(
+                    retry=retry, trigger_source=trigger_source
                 )
-                return
+            finally:
+                if not started_in_fallback:
+                    self._clear_awaiting_fallback_recovery_if_active()
 
-            if not self._is_remote_sensor_controlling():
-                delta = 0.0
-                calculated_real_target = self._virtual_target_temperature
+    async def _async_realign_real_target_locked(
+        self, *, retry: bool = False, trigger_source: str | None = None
+    ) -> None:
+        """Compute and send target realignment while holding _command_lock."""
+        sensor_temp = self._get_active_sensor_temperature()
+        real_current = self._get_real_current_temperature()
+
+        self._log_debug(
+            "_async_realign_real_target_from_sensor: virtual_target=%s, sensor_temp=%s, real_current=%s",
+            self._virtual_target_temperature,
+            sensor_temp,
+            real_current,
+        )
+
+        if sensor_temp is None or real_current is None:
+            return
+
+        if self._should_skip_sensor_realign(sensor_temp, trigger_source):
+            return
+
+        self._last_acted_sensor_temp = sensor_temp
+
+        if self.is_range_mode:
+            await self._async_realign_dual_targets(
+                sensor_temp, real_current, trigger_source=trigger_source
+            )
+            return
+
+        if not self._is_remote_sensor_controlling():
+            delta = 0.0
+            calculated_real_target = self._virtual_target_temperature
+        else:
+            delta = self._virtual_target_temperature - sensor_temp
+            calculated_real_target = real_current + delta
+        self._log_debug(
+            "Calculated real target: %s (delta: %s)",
+            calculated_real_target,
+            delta,
+        )
+
+        # Overdrive Logic: Check if we are stalled
+        # Stalled = Target not met AND Real Thermostat is Idle
+        overdrive_active, overdrive_adjust = self._evaluate_single_target_overdrive(
+            sensor_temp
+        )
+
+        if overdrive_active:
+            if self._active_overdrive_humidity:
+                # In humidity overdrive, temperature is satisfied (delta >= 0).
+                # Clamp the positive temperature delta so it does not cancel out
+                # the negative dehumidification overdrive adjustment.
+                calculated_real_target = (
+                    real_current + min(0.0, delta) + overdrive_adjust
+                )
             else:
-                delta = self._virtual_target_temperature - sensor_temp
-                calculated_real_target = real_current + delta
-            self._log_debug(
-                "Calculated real target: %s (delta: %s)", calculated_real_target, delta
-            )
+                calculated_real_target = calculated_real_target + overdrive_adjust
 
-            # Overdrive Logic: Check if we are stalled
-            # Stalled = Target not met AND Real Thermostat is Idle
-            overdrive_active, overdrive_adjust = self._evaluate_single_target_overdrive(
-                sensor_temp
-            )
-
-            if overdrive_active:
-                if self._active_overdrive_humidity:
-                    # In humidity overdrive, temperature is satisfied (delta >= 0).
-                    # Clamp the positive temperature delta so it does not cancel out
-                    # the negative dehumidification overdrive adjustment.
-                    calculated_real_target = (
-                        real_current + min(0.0, delta) + overdrive_adjust
-                    )
-                else:
-                    calculated_real_target = calculated_real_target + overdrive_adjust
-
-            desired_real_target = self._apply_safety_clamp(
-                calculated_real_target,
-                reference_target=self._virtual_target_temperature,
-            )
-            desired_real_target = self._apply_target_constraints(desired_real_target)
-            if desired_real_target is None:
-                return
-            current_real_target = self._get_real_target_temperature()
-            desired_real_target = self._apply_real_rounding_hysteresis(
+        desired_real_target = self._apply_safety_clamp(
+            calculated_real_target,
+            reference_target=self._virtual_target_temperature,
+        )
+        desired_real_target = self._apply_target_constraints(desired_real_target)
+        if desired_real_target is None:
+            return
+        current_real_target = self._get_real_target_temperature()
+        desired_real_target = self._apply_real_rounding_hysteresis(
+            desired_real_target,
+            calculated_real_target,
+            current_real_target,
+            trigger_source,
+            overdrive_active,
+            self._virtual_target_temperature,
+        )
+        if self._is_remote_sensor_controlling() and self.hvac_mode in (
+            HVACMode.COOL,
+            HVACMode.HEAT,
+        ):
+            desired_real_target = self._prevent_satisfied_rounding_crossover(
                 desired_real_target,
                 calculated_real_target,
+                real_current,
+                is_cooling=(self.hvac_mode == HVACMode.COOL),
+            )
+
+        if self.hvac_mode == HVACMode.HEAT and self._should_hold_active_heat_target(
+            sensor_temp,
+            self._virtual_target_temperature,
+            desired_real_target,
+            current_real_target,
+            trigger_source,
+            real_current,
+        ):
+            clamped_current = self._clamp_and_constrain_target(
                 current_real_target,
-                trigger_source,
-                overdrive_active,
                 self._virtual_target_temperature,
             )
-            if self._is_remote_sensor_controlling() and self.hvac_mode in (
-                HVACMode.COOL,
-                HVACMode.HEAT,
-            ):
-                desired_real_target = self._prevent_satisfied_rounding_crossover(
-                    desired_real_target,
-                    calculated_real_target,
-                    real_current,
-                    is_cooling=(self.hvac_mode == HVACMode.COOL),
-                )
-
-            if (
-                self.hvac_mode == HVACMode.HEAT
-                and self._should_hold_active_heat_target(
-                    sensor_temp,
-                    self._virtual_target_temperature,
-                    desired_real_target,
-                    current_real_target,
-                    trigger_source,
-                    real_current,
-                )
-            ):
-                clamped_current = self._clamp_and_constrain_target(
-                    current_real_target,
-                    self._virtual_target_temperature,
-                )
-                if clamped_current is not None:
-                    desired_real_target = max(desired_real_target, clamped_current)
-            elif (
-                self.hvac_mode == HVACMode.COOL
-                and self._should_hold_active_cool_target(
-                    sensor_temp,
-                    self._virtual_target_temperature,
-                    desired_real_target,
-                    current_real_target,
-                    trigger_source,
-                    real_current,
-                    humidity_overdrive_active=self._active_overdrive_humidity,
-                )
-            ):
-                clamped_current = self._clamp_and_constrain_target(
-                    current_real_target,
-                    self._virtual_target_temperature,
-                )
-                if clamped_current is not None:
-                    desired_real_target = min(desired_real_target, clamped_current)
-
-            # We must be strict here; if the step is 1.0, 66 vs 67 must be seen as different.
-            # Using self.precision (1.0) as tolerance caused isclose(66, 67, abs_tol=1.0) -> True.
-            target_tolerance = REALIGN_TARGET_TOLERANCE
-
-            # If we are in overdrive, we might be pushing AWAY from the "correct" delta-based target
-            # So we should generally update if there's a difference.
-            # But the standard check is:
-            if current_real_target is not None and math.isclose(
-                current_real_target, desired_real_target, abs_tol=target_tolerance
-            ):
-                return
-
-            if (
-                current_real_target is not None
-                and self._last_commanded_real_target is not None
-                and self._last_snapped_real_target is not None
-                and math.isclose(
-                    desired_real_target,
-                    self._last_commanded_real_target,
-                    abs_tol=target_tolerance,
-                )
-                and math.isclose(
-                    current_real_target,
-                    self._last_snapped_real_target,
-                    abs_tol=target_tolerance,
-                )
-            ):
-                self._log_debug(
-                    "Real thermostat already at snapped target %s for commanded target %s; skipping write",
-                    current_real_target,
-                    desired_real_target,
-                )
-                return
-
-            pending_tolerance = self._pending_request_tolerance()
-            if self._has_pending_real_target_request(
-                desired_real_target, pending_tolerance
-            ):
-                return
-
-            reason_overdrive = ""
-            if overdrive_active:
-                if self._active_overdrive_humidity:
-                    reason_overdrive = " (humidity overdrive)"
-                else:
-                    reason_overdrive = " (overdrive)"
-            reason = f"sensor realignment{reason_overdrive}"
-            if retry:
-                reason += " (cooldown expired)"
-
-            await self._async_log_real_adjustment(
-                desired_target=desired_real_target,
-                reason=reason,
-                virtual_target=self._virtual_target_temperature,
-                sensor_temp=sensor_temp,
-                real_current=real_current,
-                actor_name=None,
-                overdrive_adjust=overdrive_adjust if overdrive_active else None,
+            if clamped_current is not None:
+                desired_real_target = max(desired_real_target, clamped_current)
+        elif self.hvac_mode == HVACMode.COOL and self._should_hold_active_cool_target(
+            sensor_temp,
+            self._virtual_target_temperature,
+            desired_real_target,
+            current_real_target,
+            trigger_source,
+            real_current,
+            humidity_overdrive_active=self._active_overdrive_humidity,
+        ):
+            clamped_current = self._clamp_and_constrain_target(
+                current_real_target,
+                self._virtual_target_temperature,
             )
-            self._record_real_target_request(desired_real_target)
-            try:
-                # Optimistic update to prevent race conditions (echo events)
-                previous_state = (
-                    self._last_real_target_temp,
-                    self._last_real_write_time,
-                    self._last_commanded_real_target,
-                    self._last_snapped_real_target,
+            if clamped_current is not None:
+                desired_real_target = min(desired_real_target, clamped_current)
+
+        # We must be strict here; if the step is 1.0, 66 vs 67 must be seen as different.
+        # Using self.precision (1.0) as tolerance caused isclose(66, 67, abs_tol=1.0) -> True.
+        target_tolerance = REALIGN_TARGET_TOLERANCE
+
+        # If we are in overdrive, we might be pushing AWAY from the "correct" delta-based target
+        # So we should generally update if there's a difference.
+        # But the standard check is:
+        if current_real_target is not None and math.isclose(
+            current_real_target, desired_real_target, abs_tol=target_tolerance
+        ):
+            return
+
+        if (
+            current_real_target is not None
+            and self._last_commanded_real_target is not None
+            and self._last_snapped_real_target is not None
+            and math.isclose(
+                desired_real_target,
+                self._last_commanded_real_target,
+                abs_tol=target_tolerance,
+            )
+            and math.isclose(
+                current_real_target,
+                self._last_snapped_real_target,
+                abs_tol=target_tolerance,
+            )
+        ):
+            self._log_debug(
+                "Real thermostat already at snapped target %s for commanded target %s; skipping write",
+                current_real_target,
+                desired_real_target,
+            )
+            return
+
+        pending_tolerance = self._pending_request_tolerance()
+        if self._has_pending_real_target_request(
+            desired_real_target, pending_tolerance
+        ):
+            return
+
+        reason_overdrive = ""
+        if overdrive_active:
+            if self._active_overdrive_humidity:
+                reason_overdrive = " (humidity overdrive)"
+            else:
+                reason_overdrive = " (overdrive)"
+        reason = f"sensor realignment{reason_overdrive}"
+        if retry:
+            reason += " (cooldown expired)"
+
+        await self._async_log_real_adjustment(
+            desired_target=desired_real_target,
+            reason=reason,
+            virtual_target=self._virtual_target_temperature,
+            sensor_temp=sensor_temp,
+            real_current=real_current,
+            actor_name=None,
+            overdrive_adjust=overdrive_adjust if overdrive_active else None,
+        )
+        self._record_real_target_request(desired_real_target)
+        try:
+            # Optimistic update to prevent race conditions (echo events)
+            previous_state = (
+                self._last_real_target_temp,
+                self._last_real_write_time,
+                self._last_commanded_real_target,
+                self._last_snapped_real_target,
+            )
+
+            step_size = self.target_temperature_step or 0
+            loose_tolerance = max(PENDING_REQUEST_TOLERANCE_MAX, step_size * 0.75)
+            self._last_commanded_real_target = desired_real_target
+            if current_real_target is not None and math.isclose(
+                current_real_target,
+                desired_real_target,
+                abs_tol=loose_tolerance,
+            ):
+                self._last_snapped_real_target = current_real_target
+            else:
+                self._last_snapped_real_target = None
+
+            self._last_real_target_temp = desired_real_target
+            self._last_real_write_time = time.monotonic()
+
+            await self.hass.services.async_call(
+                CLIMATE_DOMAIN,
+                SERVICE_SET_TEMPERATURE,
+                {
+                    ATTR_ENTITY_ID: self._real_entity_id,
+                    ATTR_TEMPERATURE: desired_real_target,
+                },
+                blocking=True,
+            )
+        except Exception as err:
+            # Rollback state on failure to maintain consistency
+            (
+                self._last_real_target_temp,
+                self._last_real_write_time,
+                self._last_commanded_real_target,
+                self._last_snapped_real_target,
+            ) = previous_state
+            self._remove_real_target_request(desired_real_target)
+
+            if "502" in str(err) or "Bad Gateway" in str(err):
+                _LOGGER.warning(
+                    "Failed to set temperature on %s (502 Bad Gateway) - will retry on next sync",
+                    self._real_entity_id,
                 )
-
-                step_size = self.target_temperature_step or 0
-                loose_tolerance = max(PENDING_REQUEST_TOLERANCE_MAX, step_size * 0.75)
-                self._last_commanded_real_target = desired_real_target
-                if current_real_target is not None and math.isclose(
-                    current_real_target, desired_real_target, abs_tol=loose_tolerance
-                ):
-                    self._last_snapped_real_target = current_real_target
-                else:
-                    self._last_snapped_real_target = None
-
-                self._last_real_target_temp = desired_real_target
-                self._last_real_write_time = time.monotonic()
-
-                await self.hass.services.async_call(
-                    CLIMATE_DOMAIN,
-                    SERVICE_SET_TEMPERATURE,
-                    {
-                        ATTR_ENTITY_ID: self._real_entity_id,
-                        ATTR_TEMPERATURE: desired_real_target,
-                    },
-                    blocking=True,
+            else:
+                _LOGGER.error(
+                    "Error setting %s temperature to %s: %s",
+                    self._real_entity_id,
+                    desired_real_target,
+                    err,
                 )
-            except Exception as err:
-                # Rollback state on failure to maintain consistency
-                (
-                    self._last_real_target_temp,
-                    self._last_real_write_time,
-                    self._last_commanded_real_target,
-                    self._last_snapped_real_target,
-                ) = previous_state
-                self._remove_real_target_request(desired_real_target)
-
-                if "502" in str(err) or "Bad Gateway" in str(err):
-                    _LOGGER.warning(
-                        "Failed to set temperature on %s (502 Bad Gateway) - will retry on next sync",
-                        self._real_entity_id,
-                    )
-                else:
-                    _LOGGER.error(
-                        "Error setting %s temperature to %s: %s",
-                        self._real_entity_id,
-                        desired_real_target,
-                        err,
-                    )
 
     def _evaluate_dual_target_overdrive(
         self,
