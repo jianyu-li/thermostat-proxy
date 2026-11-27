@@ -145,6 +145,7 @@ REALIGN_TARGET_TOLERANCE = (
 REAL_ROUNDING_HYSTERESIS_FRACTION = (
     0.25  # Extra fraction of step required to flip target on real-only jitter
 )
+OVERDRIVE_IDLE_ACTIONS = (HVACAction.IDLE, HVACAction.FAN)
 
 # Attributes supplied by ClimateEntity itself that must NOT be overridden by
 # forwarding the physical thermostat's attributes, otherwise the front-end sees
@@ -1697,7 +1698,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             sensor_temp > min_overcool_target if sensor_temp is not None else False
         )
 
-        cooling_is_idle = real_action == HVACAction.IDLE
+        cooling_is_idle = real_action in OVERDRIVE_IDLE_ACTIONS
         cooling_is_active = real_action == HVACAction.COOLING
 
         if (
@@ -2800,7 +2801,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                         sensor_temp + tolerance
                     )
 
-                heating_is_idle = real_action == HVACAction.IDLE
+                heating_is_idle = real_action in OVERDRIVE_IDLE_ACTIONS
                 heating_is_active = real_action == HVACAction.HEATING
                 if (
                     self._overdrive_offset > 0
@@ -2833,7 +2834,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                         sensor_temp - tolerance
                     )
 
-                cooling_is_idle = real_action == HVACAction.IDLE
+                cooling_is_idle = real_action in OVERDRIVE_IDLE_ACTIONS
                 cooling_is_active = real_action == HVACAction.COOLING
                 if (
                     self._overdrive_offset > 0
@@ -3206,9 +3207,8 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
             tolerance = max(self.precision or DEFAULT_PRECISION, 0.1)
             deadband = max(tolerance, self._sensor_change_threshold)
 
-            heating_is_idle = real_action == HVACAction.IDLE
+            action_is_idle = real_action in OVERDRIVE_IDLE_ACTIONS
             heating_is_active = real_action == HVACAction.HEATING
-            cooling_is_idle = real_action == HVACAction.IDLE
             cooling_is_active = real_action == HVACAction.COOLING
 
             if (
@@ -3225,7 +3225,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     )
 
                 if want_heat and (
-                    heating_is_idle
+                    action_is_idle
                     or (heating_is_active and self._active_overdrive_heat)
                 ):
                     self._active_overdrive_heat = True
@@ -3251,7 +3251,7 @@ class CustomThermostatEntity(RestoreEntity, ClimateEntity):
                     )
 
                 if want_cool and (
-                    cooling_is_idle
+                    action_is_idle
                     or (cooling_is_active and self._active_overdrive_cool)
                 ):
                     self._active_overdrive_cool = True

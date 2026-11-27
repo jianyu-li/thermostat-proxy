@@ -12,7 +12,7 @@ from .test_climate import create_proxy
 
 
 @pytest.mark.parametrize(
-    "action", [None, "unknown", "unavailable", "off", "idle", "heating"]
+    "action", [None, "unknown", "unavailable", "off", "idle", "fan", "heating"]
 )
 @pytest.mark.parametrize("already_active", [False, True])
 @pytest.mark.asyncio
@@ -30,14 +30,14 @@ async def test_heating_overdrive_requires_known_action(hass, action, already_act
 
     active, offset = proxy._evaluate_single_target_overdrive(20.0)
 
-    expected = action == "idle" or (already_active and action == "heating")
+    expected = action in ("idle", "fan") or (already_active and action == "heating")
     assert active is expected
     assert proxy._active_overdrive_heat is expected
     assert offset == (proxy._overdrive_offset if expected else 0.0)
 
 
 @pytest.mark.parametrize(
-    "action", [None, "unknown", "unavailable", "off", "idle", "cooling"]
+    "action", [None, "unknown", "unavailable", "off", "idle", "fan", "cooling"]
 )
 @pytest.mark.parametrize("already_active", [False, True])
 @pytest.mark.asyncio
@@ -55,19 +55,19 @@ async def test_cooling_overdrive_requires_known_action(hass, action, already_act
 
     active, offset = proxy._evaluate_single_target_overdrive(22.0)
 
-    expected = action == "idle" or (already_active and action == "cooling")
+    expected = action in ("idle", "fan") or (already_active and action == "cooling")
     assert active is expected
     assert proxy._active_overdrive_cool is expected
     assert offset == (-proxy._overdrive_offset if expected else 0.0)
 
 
 @pytest.mark.parametrize(
-    "action", [None, "unknown", "unavailable", "off", "idle", "cooling"]
+    "action", [None, "unknown", "unavailable", "off", "idle", "fan", "cooling"]
 )
 @pytest.mark.parametrize("already_active", [False, True])
 @pytest.mark.asyncio
 async def test_humidity_overdrive_requires_known_action(hass, action, already_active):
-    """Humidity overdrive requires confirmed idle or cooling action."""
+    """Humidity overdrive requires confirmed idle, fan, or cooling action."""
     proxy = create_proxy(
         hass,
         sensors=[
@@ -94,21 +94,22 @@ async def test_humidity_overdrive_requires_known_action(hass, action, already_ac
 
     active, offset = proxy._evaluate_single_target_overdrive(22.0)
 
-    expected = action == "idle" or (already_active and action == "cooling")
+    expected = action in ("idle", "fan") or (already_active and action == "cooling")
     assert active is expected
     assert proxy._active_overdrive_humidity is expected
     assert offset == (-1.0 if expected else 0.0)
 
 
 @pytest.mark.parametrize(
-    "action", [None, "unknown", "unavailable", "off", "idle", "heating", "cooling"]
+    "action",
+    [None, "unknown", "unavailable", "off", "idle", "fan", "heating", "cooling"],
 )
 @pytest.mark.parametrize("already_active", [False, True])
 @pytest.mark.asyncio
 async def test_dual_target_overdrive_requires_known_action(
     hass, action, already_active
 ):
-    """Dual setpoint overdrive requires confirmed idle or matching active action."""
+    """Dual setpoint overdrive requires confirmed idle, fan, or matching active action."""
     proxy = create_proxy(hass, target_temp_step=0.1)
     proxy._selected_sensor_name = "Sensor 1"
     proxy._sensor_states["sensor.1"] = State("sensor.1", "20.0")
@@ -123,7 +124,7 @@ async def test_dual_target_overdrive_requires_known_action(
     proxy._active_overdrive_heat = already_active
     proxy._active_overdrive_cool = False
     adj_low, adj_high = proxy._evaluate_dual_target_overdrive(16.0, 18.0, 24.0)
-    expected_low = action == "idle" or (already_active and action == "heating")
+    expected_low = action in ("idle", "fan") or (already_active and action == "heating")
     assert adj_low == (proxy._overdrive_offset if expected_low else 0.0)
     assert proxy._active_overdrive_heat is expected_low
     assert adj_high == 0.0
@@ -133,7 +134,9 @@ async def test_dual_target_overdrive_requires_known_action(
     proxy._active_overdrive_heat = False
     proxy._active_overdrive_cool = already_active
     adj_low, adj_high = proxy._evaluate_dual_target_overdrive(26.0, 18.0, 24.0)
-    expected_high = action == "idle" or (already_active and action == "cooling")
+    expected_high = action in ("idle", "fan") or (
+        already_active and action == "cooling"
+    )
     assert adj_low == 0.0
     assert proxy._active_overdrive_heat is False
     assert adj_high == (-proxy._overdrive_offset if expected_high else 0.0)
