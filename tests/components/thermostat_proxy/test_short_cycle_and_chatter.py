@@ -1043,3 +1043,83 @@ async def test_manual_set_temperature_cancels_pending_cooldown_timer(hass):
     dual_unsub.assert_called_once()
     assert dual_proxy._cooldown_timer_unsub is None
     assert dual_proxy._pending_cooldown_trigger_source is None
+
+
+@pytest.mark.asyncio
+async def test_dual_overdrive_persists_through_post_heat_fan_purge(hass):
+    """Overdrive must not drop on post-heat HVACAction.FAN purge or trigger cooldown."""
+    base_attrs = {
+        "current_temperature": 66.0,
+        "target_temp_low": 67.0,
+        "target_temp_high": 72.0,
+        "hvac_action": HVACAction.HEATING,
+        "temperature_unit": "°F",
+        "min_temp": 50.0,
+        "max_temp": 90.0,
+        "target_temp_step": 1.0,
+        "supported_features": (
+            ClimateEntityFeature.TARGET_TEMPERATURE_RANGE
+            | ClimateEntityFeature.PRESET_MODE
+        ),
+    }
+    proxy = _make_proxy(
+        hass,
+        hvac_mode=HVACMode.HEAT_COOL,
+        real_attrs=base_attrs,
+        remote_temp="67.856",
+        cooldown_period=180,
+    )
+    proxy._virtual_target_temperature_low = 68.0
+    proxy._virtual_target_temperature_high = 74.0
+    proxy._active_overdrive_heat = True
+    proxy._last_real_target_low = 67.0
+    proxy._last_real_target_high = 72.0
+    proxy._last_commanded_real_target_low = 67.0
+    proxy._last_commanded_real_target_high = 72.0
+    proxy._last_acted_sensor_temp = 67.856
+    proxy._last_real_write_time = time.monotonic() - 200.0
+
+    # 1. Physical thermostat finishes heating burst and enters post-heat fan purge
+    fan_attrs = {**base_attrs, "hvac_action": HVACAction.FAN}
+    hass.states.async_set("climate.real", HVACMode.HEAT_COOL, fan_attrs)
+    proxy._real_state = hass.states.get("climate.real")
+    await proxy._async_realign_real_target_from_sensor(trigger_source="real")
+
+    assert proxy._active_overdrive_heat is True
+    assert _climate_set_calls(hass) == []
+    assert proxy._cooldown_timer_unsub is None
+
+    # 2. Fan purge ends (hvac_action -> idle) and living room warms to 67.0 while remote is still 67.856
+    idle_attrs = {
+        **base_attrs,
+        "current_temperature": 67.0,
+        "hvac_action": HVACAction.IDLE,
+    }
+    hass.states.async_set("climate.real", HVACMode.HEAT_COOL, idle_attrs)
+    proxy._real_state = hass.states.get("climate.real")
+    await proxy._async_realign_real_target_from_sensor(trigger_source="real")
+
+    calls = _climate_set_calls(hass)
+    assert len(calls) == 1
+    assert calls[0].args[2]["target_temp_low"] == 68.0
+    assert calls[0].args[2]["target_temp_high"] == 73.0
+    assert proxy._active_overdrive_heat is True
+
+    # Reflect the Step 2 setpoint write on the physical thermostat before Step 3
+    hass.states.async_set(
+        "climate.real",
+        HVACMode.HEAT_COOL,
+        {**idle_attrs, "target_temp_low": 68.0, "target_temp_high": 73.0},
+    )
+    proxy._real_state = hass.states.get("climate.real")
+
+    # 3. Remote sensor later satisfies target -> overdrive deactivates cleanly
+    proxy._last_real_write_time = time.monotonic() - 200.0
+    hass.states.async_set("sensor.remote", "68.2", {"unit_of_measurement": "°F"})
+    proxy._sensor_states["sensor.remote"] = hass.states.get("sensor.remote")
+    await proxy._async_realign_real_target_from_sensor(trigger_source="sensor")
+
+    assert proxy._active_overdrive_heat is False
+    calls = _climate_set_calls(hass)
+    assert len(calls) == 2
+    assert calls[1].args[2]["target_temp_low"] == 66.0
